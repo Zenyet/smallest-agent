@@ -1,0 +1,8 @@
+node_modules
+.env
+dist
+.cache
+models
+.sessions
+.llm-cache
+eval-results.json
