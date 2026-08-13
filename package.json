@@ -3,26 +3,96 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
+  "main": "out/main/index.js",
+  "build": {
+    "appId": "com.smallest-agent.app",
+    "productName": "Smallest Agent",
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "build"
+    },
+    "files": [
+      "out/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "out/main/mcp-server.js",
+        "to": "mcp-server.js"
+      },
+      {
+        "from": "skills",
+        "to": "skills"
+      }
+    ],
+    "asarUnpack": [
+      "**/node_modules/@huggingface/**",
+      "**/node_modules/onnxruntime-node/**",
+      "**/node_modules/sharp/**"
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage"
+      ]
+    }
+  },
   "scripts": {
     "dev": "tsx cli.ts",
     "eval": "tsx eval.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:electron": "electron-vite dev",
+    "build:electron": "electron-vite build",
+    "preview:electron": "electron-vite preview",
+    "package:mac": "electron-vite build && electron-builder --mac",
+    "package:win": "electron-vite build && electron-builder --win",
+    "package:linux": "electron-vite build && electron-builder --linux"
   },
   "dependencies": {
     "@ai-sdk/openai-compatible": "^2.0.50",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
+    "@fontsource/inter": "^5.3.0",
     "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@modelcontextprotocol/server-filesystem": "^2026.1.14",
     "ai": "^6.0.205",
     "dotenv": "^17.4.2",
+    "electron-store": "^11.0.2",
+    "react-markdown": "^10.1.0",
+    "shiki": "^4.4.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@tailwindcss/vite": "^4.3.3",
+    "@testing-library/react": "^16.3.2",
     "@types/node": "^25.9.3",
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4",
+    "@vitejs/plugin-react": "^5.2.0",
+    "electron": "^43.3.0",
+    "electron-builder": "^26.15.3",
+    "electron-vite": "^5.0.0",
+    "jsdom": "^30.0.1",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "tailwindcss": "^4.3.3",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
+    "vite": "^7.3.6",
     "vitest": "^4.1.9"
   }
 }

@@ -6,3 +6,5 @@ models
 .sessions
 .llm-cache
 eval-results.json
+out
+dist-electron

@@ -3,13 +3,35 @@
 用一个最小但能真正跑起来的 agent，把 18 个 AI 工程核心概念串成一条线，基于代码动手学习。
 方法论：**先跑通最小例子，再理解原理**。核心就是一个手写的 `while` 循环——每个概念都是「在循环的某个位置加一段代码」。
 
-## 运行
+## 两个入口：CLI 和桌面版
+
+同一套 agent 核心（`src/`），两个入口：
+
+| | 命令行 | 桌面版 |
+|---|---|---|
+| 启动 | `pnpm dev "你的问题"` | `pnpm dev:electron` |
+| 打包 | - | `pnpm package:mac` |
+| 入口文件 | `cli.ts` | `electron/main/index.ts` |
+| 适合 | 读代码、看 trace、跑 eval | 日常使用、多会话 |
+
+**建议的阅读顺序：先 CLI 再桌面版。** `cli.ts` 把整条装配线写在一个文件里，从上往下读就能看懂 agent 是怎么组装起来的；桌面版是同一条装配线拆成「启动时一次」和「每条消息一次」两段，先理解了单次版本再看拆分才不会绕。
+
+桌面版的架构说明见 [`electron/README.md`](electron/README.md)。
+
+## 快速开始
 
 ```bash
 pnpm install
 cp .env.example .env   # 填入 DeepSeek 的 key / baseURL / model
+
+# 命令行
 pnpm dev "北京天气怎么样"
-pnpm test              # 跑单元测试
+
+# 桌面版（首次启动后在设置面板填入 API Key）
+pnpm dev:electron
+
+# 测试
+pnpm test              # 266 个测试（CLI + 桌面版）
 ```
 
 ## Stage 0 在做什么
@@ -123,11 +145,15 @@ src/memory/    store / compact / summarize（记忆 + 压缩）
 src/mcp/       MCP client（connectMcp + loadMcpTools）
 mcp-server.ts  stdio MCP server（get_weather + skills）
 skills/        技能 markdown（渐进披露）
-cli.ts         入口
+cli.ts         CLI 入口
 src/resilience.ts  withRetry + withFallback（限流降级）
 src/cache.ts       磁盘 LLM 缓存（省 token）
 src/verify.ts      LLM-as-Judge 证据核查（降幻觉）
 src/eval/      scorers + harness（评估打分）
 evals/cases.ts 评估用例
 eval.ts        pnpm eval 入口
+
+electron/main/      主进程：App 级装配 + IPC + agent 执行
+electron/renderer/  前端：React 聊天界面
+electron/shared/    两端共用的 IPC 频道与事件类型
 ```
