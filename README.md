@@ -31,8 +31,17 @@ pnpm dev "北京天气怎么样"
 pnpm dev:electron
 
 # 测试
-pnpm test              # 266 个测试（CLI + 桌面版）
+pnpm test              # 293 个测试（CLI + 桌面版）
 ```
+
+> **桌面版第一次跑报 `Error: Electron uninstall`？** pnpm 默认不执行依赖的
+> `postinstall`（安装时会提示 `Ignored build scripts`），而 Electron 靠那个脚本
+> 下载它约 300MB 的运行时二进制。`package.json` 里已经用 `pnpm.onlyBuiltDependencies`
+> 放行了它，正常 `pnpm install` 就够；万一仍然缺，手动补一次：
+>
+> ```bash
+> node node_modules/electron/install.js
+> ```
 
 ## Stage 0 在做什么
 

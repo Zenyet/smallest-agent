@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "electron",
+      "esbuild",
+      "electron-winstaller"
+    ]
+  },
   "build": {
     "appId": "com.smallest-agent.app",
     "productName": "Smallest Agent",
