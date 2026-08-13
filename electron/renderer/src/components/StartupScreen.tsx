@@ -90,10 +90,15 @@ export function StartupScreen({
   }
 
   return (
-    // 启动阶段 App.tsx 直接渲染这个组件，不经过主 UI 的 drag 条包装层，
-    // 所以这里自己补一条——否则启动/失败画面时窗口完全无法拖动。
-    <div className="flex h-full min-w-0 flex-1 flex-col">
-      <div aria-hidden className="h-9 shrink-0 [-webkit-app-region:drag]" />
+    // 启动阶段 App.tsx 直接渲染这个组件，此时侧边栏（拖拽区所在处）还没挂载，
+    // 所以这里必须自己补一条，否则启动/失败画面期间窗口完全拖不动。
+    // 用 absolute 浮在顶部而不是 flex 里的一行：那样它不占布局高度，
+    // 下面的内容照旧在整个视口里居中，不会被压下去 36px。
+    <div className="relative flex h-full min-w-0 flex-1 flex-col">
+      <div
+        aria-hidden
+        className="absolute inset-x-0 top-0 h-9 [-webkit-app-region:drag]"
+      />
       {body}
     </div>
   )

@@ -18,6 +18,14 @@ export function SessionList({
 }) {
   return (
     <aside className="sidebar flex w-56 flex-none flex-col gap-1.5 border-r border-line bg-canvas p-2">
+      {/* 窗口拖拽区 + 红绿灯让位，二合一。
+          main 进程用 titleBarStyle: 'hiddenInset' 去掉了 macOS 原生标题栏，代价是
+          整个窗口失去默认可拖拽区域，必须自己画一块标 -webkit-app-region: drag。
+          红绿灯连按钮带边距占左上角约 78px 宽，这块 h-7 给它让出纵向空间；
+          放在侧边栏内部而不是横跨整个 app 顶部，是因为红绿灯只在左边，
+          没必要让右侧对话区也跟着往下缩一条。
+          块内无控件，所以不需要 no-drag 子区域。 */}
+      <div aria-hidden className="h-7 shrink-0 [-webkit-app-region:drag]" />
       {/* 新建按钮：紧凑的 h-7，与列表行高一致。 */}
       <button
         type="button"

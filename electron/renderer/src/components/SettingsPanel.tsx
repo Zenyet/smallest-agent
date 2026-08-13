@@ -6,6 +6,10 @@ import { api } from '../api'
 
 // 每个字段的说明，直接对应 src/config.ts 里的默认值语义
 const HINTS: Partial<Record<(typeof SETTING_KEYS)[number], string>> = {
+  // 明文存储这件事以前挂在面板底部的 footer 里。footer 撤掉后没让这句消失——
+  // 它是一条真实的安全披露（不引 keytar 是为了少一层跨平台打包复杂度），
+  // 挪到用户实际填 key 的这一栏下面，比压在页脚更该被看到。
+  DEEPSEEK_API_KEY: '以明文存在本地 userData 目录，不加密',
   DEEPSEEK_BASE_URL: '默认 https://api.deepseek.com/v1',
   DEEPSEEK_MODEL: '默认 deepseek-chat',
   FALLBACK_MODEL: '主模型连续失败时切换的备用模型',
@@ -269,9 +273,9 @@ export function SettingsPanel({
         </div>
       </div>
 
-      <footer className="flex items-center justify-end border-t border-line px-4 py-2.5">
-        <p className="m-0 text-[11.5px] text-ink-3">API Key 以明文存在本地 userData 目录</p>
-      </footer>
+      {/* 这里以前有个只放一句「API Key 以明文存储」的 footer。改完即生效之后
+          它不再承载任何操作，只是白占一条高度，撤掉；那句披露挪进了
+          DEEPSEEK_API_KEY 的 hint（见文件顶部 HINTS）。 */}
     </div>
   )
 }

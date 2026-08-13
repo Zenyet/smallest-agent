@@ -262,13 +262,11 @@ export function App() {
     // 顶部拖拽条 + 下面的 sidebar/chat 行合在一起是完整窗口，所以要用 flex-col 包一层，
     // 否则拖拽条会跟 sidebar/chat 并排而不是叠在上面。
     <div className="flex h-full min-w-0 flex-1 flex-col">
-      {/* 窗口拖拽区：macOS 用 hiddenInset 去掉了原生标题栏，只留左上角三个圆点，
-          整块窗口失去了默认可拖拽区域，得自己画一条。这条横跨 sidebar + chat 整个宽度，
-          红绿灯连按钮带边距实际占左侧约 78px，这条 h-9（36px，与 main 进程
-          titleBarOverlay 的 height 对齐）刚好盖住那一圈的纵向高度。条内没有任何
-          控件，不需要 no-drag 子区域——SettingsPanel 打开时是全屏 fixed 覆盖层，
-          会盖住这条，所以它自己的 header 另外标了 drag（见 SettingsPanel.tsx）。 */}
-      <div aria-hidden className="h-9 shrink-0 [-webkit-app-region:drag]" />
+      {/* 这里以前横着一条 h-9 的窗口拖拽区，把左右两栏整体往下压了 36px。
+          现在拖拽区挪进了 SessionList 顶部（见那个文件里的 titlebar 说明）：
+          既然红绿灯本来就只在左上角，让侧边栏自己给它让位就够了，
+          没必要让整个 app 顶上留一条空白横条。
+          这样左右两个容器直接顶到窗口上沿，占满整个视口。 */}
       <div className="flex min-h-0 flex-1">
         <SessionList
           sessions={sessions}
