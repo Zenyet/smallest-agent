@@ -2,10 +2,15 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { SessionList } from './components/SessionList'
 import { ChatWindow, type BlockedBy } from './components/ChatWindow'
 import { StartupScreen } from './components/StartupScreen'
-import { SettingsPanel } from './components/SettingsPanel'
 import { chatReducer, emptySession } from './chat-reducer'
+import { groupSessions } from '../../main/projects'
 import { api } from './api'
-import type { ApprovalDecision, SessionMeta, RuntimeStatusEvent, DesktopSettings } from '../../shared/channels'
+import type {
+  ApprovalDecision,
+  SessionMeta,
+  ProjectsState,
+  RuntimeStatusEvent,
+} from '../../shared/channels'
 
 // 新建的空会话在第一条消息回完之前不落盘（见 create() 的乐观更新），
 // 但任何一个会话的消息一答完，onMessageComplete 就会用磁盘列表刷新 sessions。
@@ -37,8 +42,18 @@ export function App() {
   const [sessions, setSessions] = useState<SessionMeta[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [status, setStatus] = useState<RuntimeStatusEvent>({ phase: 'embedding', detail: '启动中…' })
-  const [showSettings, setShowSettings] = useState(false)
-  const [settings, setSettings] = useState<DesktopSettings>({})
+  // 项目分组状态。真相在主进程的 electron-store 里（会话文件存不了这个，
+  // 见 main/projects.ts 顶部），这里只是一份副本：每次写操作拿主进程返回的
+  // 完整状态覆盖它，另外订阅 onProjectsChanged 接住别处（比如设置窗口将来
+  // 也能改）的改动，而不是自己推算下一个状态。
+  const [projects, setProjects] = useState<ProjectsState>({
+    projects: [],
+    sessionProject: {},
+    collapsed: [],
+  })
+  // 当前选中的项目：决定新会话落在哪儿。跟 currentId（当前会话）是两件事——
+  // 用户可以选中一个项目却不打开它下面任何会话（比如刚添加完，里面还是空的）。
+  const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
   // remove() 发起删除的那一刻起同步打上 tombstone，见上面 mergeSessions 的注释。
   // 用 ref 而不是 state：它不需要触发渲染，只需要在异步空档里被任何并发调用
   // 同步地看到——用 state 的话，读到的可能是还没被这次 setState 提交的旧值。
@@ -55,6 +70,10 @@ export function App() {
       api.onVerdict((event) => dispatch({ type: 'verdict', event })),
       api.onError((event) => dispatch({ type: 'error', event })),
       api.onApprovalRequest((event) => dispatch({ type: 'approval-request', event })),
+      // 项目状态的广播。这个窗口自己的写操作已经用返回值更新过一次了，
+      // 但广播是"任何来源的改动都到得了每个窗口"的那条通路，两者不冲突
+      // （同一份状态覆盖两次是幂等的）。
+      api.onProjectsChanged(setProjects),
       api.onMessageComplete((event) => {
         dispatch({ type: 'complete', event })
         // 答完了会话文件才落盘，这时候刷新列表才能拿到标题
@@ -75,26 +94,24 @@ export function App() {
     void api.getRuntimeStatus().then(setStatus)
   }, [])
 
-  // 设置必须等 ready 才能拉：getSettings 的 handler 是 setupIpcHandlers 注册的，
-  // 而那要等 createRuntime 跑完。挂载就调会输掉这个竞态、被静默丢弃（没有 .catch），
-  // settings 就一直停在 {}。后果不是「少显示点东西」——SettingsPanel 的 draft 只在
-  // 挂载时从 settings 播种一次，所以用户会看到一排空输入框，然后一点保存就把空配置
-  // 写回磁盘，把本来好的 key 冲掉。
-  // 加 .catch：这条路径以前是裸 void，失败时连日志都没有（这个项目已经在
-  // Task 13/15 因为丢 .catch 栽过两次）。
-  useEffect(() => {
-    if (status.phase !== 'ready') return
-    api
-      .getSettings()
-      .then(setSettings)
-      .catch((err: unknown) => {
-        console.error('[settings] 读取失败：', err instanceof Error ? err.message : err)
-      })
-  }, [status.phase])
+  // 这里以前还有一个「等 ready 之后拉 settings」的 effect。设置搬进独立窗口后，
+  // 那份 state 在主窗口里没有任何消费者了（面板不在这儿渲染，draft 也不在这儿播种），
+  // 所以整块删掉，而不是留一份没人读、还会慢慢变旧的副本。
+  //
+  // 那段注释警告的坑（settings 没读回来就渲染面板 → 一排空输入框 → 一保存把好的
+  // key 冲掉）没有丢，它跟着面板搬到了 SettingsWindow.tsx：那边同样等 phase 落定
+  // 才 getSettings，且在拿到之前不渲染 SettingsPanel。
+  //
+  // 设置改动要不要通知主窗口：主进程每轮都用 readConfig() 重新读一次设置
+  // （见 ipc-handlers.ts），所以 STREAM / MAX_TURNS 这类改动下一轮自然生效，
+  // 主窗口不需要知道。NOTES_DIR / EMBEDDING_MODEL 要重启才生效，那条路由
+  // 设置窗口自己的重启警告负责。广播（CH.settingsChanged）仍然发给所有窗口，
+  // 设置窗口靠它推进重启警告的比较基线。
 
-  // 启动时拉会话列表，没有会话就开一个新的；同时拉一次 runner 快照，把"谁在跑、
-  // 谁在等审批"这两件事也补回来——这两者都活在主进程里，不会因为 renderer 重新
-  // 挂载就消失，但本地的 chats 状态是从零开始的，事件流只能捕捉"挂载之后"发生的事。
+  // 启动时拉会话列表和项目状态，没有会话就开一个新的；同时拉一次 runner 快照，
+  // 把"谁在跑、谁在等审批"这两件事也补回来——这两者都活在主进程里，不会因为
+  // renderer 重新挂载就消失，但本地的 chats 状态是从零开始的，事件流只能捕捉
+  // "挂载之后"发生的事。
   // 必须等 status 变 ready 才能调：会话相关的 ipcMain.handle 是 setupIpcHandlers
   // 里注册的，而那要等 createRuntime（装 embedding/建索引/连 MCP）跑完才执行，
   // 比 renderer 挂载慢得多。挂载就调的话会砸在"No handler registered"上，
@@ -102,10 +119,15 @@ export function App() {
   useEffect(() => {
     if (status.phase !== 'ready') return
     void (async () => {
-      const list = await api.listSessions()
+      // 项目状态和会话列表一起拉：会话行要嵌在项目下面，少哪个都渲染不出分组。
+      const [list, projectsState] = await Promise.all([api.listSessions(), api.getProjects()])
       setSessions(list)
+      setProjects(projectsState)
       if (list.length > 0) {
         setCurrentId(list[0].id)
+        // 打开的会话属于哪个项目，就把那个项目也标成选中的——否则用户接着点
+        // 「新对话」会莫名落到「未分组」，而他眼里明明正在某个项目里干活。
+        setCurrentProjectId(list[0].projectId ?? null)
       } else {
         setCurrentId(await api.createSession())
       }
@@ -121,17 +143,58 @@ export function App() {
   }, [status.phase])
 
   // 切换会话时从磁盘加载历史（内存里没有的话）
-  const select = useCallback(async (id: string) => {
-    setCurrentId(id)
-    const messages = await api.loadSession(id)
-    dispatch({ type: 'loaded', sessionId: id, messages })
-  }, [])
+  const select = useCallback(
+    async (id: string) => {
+      setCurrentId(id)
+      // 选中会话时把它所属的项目也标成选中：用户点开某个项目下的会话，
+      // 接着点「新对话」应该继续落在那个项目里，而不是掉回「未分组」。
+      const projectId = sessions.find((s) => s.id === id)?.projectId ?? null
+      setCurrentProjectId(projectId)
+      const messages = await api.loadSession(id)
+      dispatch({ type: 'loaded', sessionId: id, messages })
+    },
+    [sessions],
+  )
 
   const create = useCallback(async () => {
-    const id = await api.createSession()
-    // 乐观加进列表：空会话不落盘，不这样做的话它在第一次回答前不会出现
-    setSessions((prev) => [{ id, title: '新会话', updatedAt: Date.now() }, ...prev])
+    // 新会话落在当前选中的项目里。projectId 交给主进程去建映射（它才是真相
+    // 所在），而不是本地先记一份再想办法同步。
+    const id = await api.createSession(currentProjectId)
+    // 乐观加进列表：空会话不落盘，不这样做的话它在第一次回答前不会出现。
+    // projectId 一并带上，否则它会先在「未分组」里出现一下，等第一次回答完
+    // listSessions 刷新才跳到项目下面——用户看得见这一下跳动。
+    setSessions((prev) => [
+      { id, title: '新会话', updatedAt: Date.now(), ...(currentProjectId ? { projectId: currentProjectId } : {}) },
+      ...prev,
+    ])
     setCurrentId(id)
+  }, [currentProjectId])
+
+  // --- 项目操作 ---
+  // 写操作都用主进程返回的完整状态覆盖本地副本，不自己推算。
+  const addProject = useCallback(async () => {
+    // 主进程弹原生目录选择器。用户取消时返回 null —— 取消不是失败，原样不动。
+    const result = await api.addProject()
+    if (!result) return
+    setProjects(result.state)
+    // 刚添加完就选中它：用户下一步大概率是在这个项目里开对话。
+    setCurrentProjectId(result.project.id)
+  }, [])
+
+  const removeProjectById = useCallback(
+    async (id: string) => {
+      const next = await api.removeProject(id)
+      setProjects(next)
+      // 选中的项目被移掉了，选中态得跟着放掉，否则新会话会挂到一个已经不存在
+      // 的项目 id 上（主进程的 assignSession 会当 null 处理，但 UI 上那一行
+      // 已经没了，选中态无处可显示，用户不知道新会话要去哪儿）。
+      if (currentProjectId === id) setCurrentProjectId(null)
+    },
+    [currentProjectId],
+  )
+
+  const toggleCollapsed = useCallback(async (id: string) => {
+    setProjects(await api.toggleProjectCollapsed(id))
   }, [])
 
   const remove = useCallback(
@@ -224,18 +287,14 @@ export function App() {
     if (blockedBy) void select(blockedBy.sessionId)
   }, [blockedBy, select])
 
-  const saveSettings = useCallback(async (patch: DesktopSettings) => {
-    try {
-      const next = await api.saveSettings(patch)
-      setSettings(next)
-      // 不再自动关闭面板——auto-save 模式下用户一直在编辑
-    } catch (err) {
-      // 验证失败：保持面板打开，让 SettingsPanel 显示错误
-      throw err
-    }
-  }, [])
+  // saveSettings 从这里搬走了：写设置现在是设置窗口自己的事（SettingsWindow.tsx），
+  // 主窗口只负责把那个窗口叫出来。
 
   const chat = (currentId && chats[currentId]) || emptySession()
+
+  // 会话按项目分组。分组逻辑在 main/projects.ts 里（纯函数，可单测），
+  // 这里只把两份数据交给它 —— 不在组件里现算，免得同一套规则在别处再写一遍。
+  const groups = useMemo(() => groupSessions(sessions, projects), [sessions, projects])
 
   if (status.phase !== 'ready') {
     // 失败路径的 restartApp handler 目前不带守卫（这时没有正在跑的 turn 或待审批要保护），
@@ -269,12 +328,46 @@ export function App() {
           这样左右两个容器直接顶到窗口上沿，占满整个视口。 */}
       <div className="flex min-h-0 flex-1">
         <SessionList
-          sessions={sessions}
+          groups={groups}
           currentId={currentId}
+          currentProjectId={currentProjectId}
           onSelect={(id) => void select(id)}
           onCreate={() => void create()}
-          onDelete={(id) => void remove(id)}
-          onOpenSettings={() => setShowSettings(true)}
+          // 右键菜单：SessionList 只报告「哪一项被右键了」，菜单内容和弹出都在
+          // 主进程（原生菜单，见 main/context-menu.ts）。选了动作才落到删除逻辑上，
+          // 删除本身没变 —— 包括正在跑的会话会被拒（DELETE_BLOCKED）和 tombstone。
+          onSessionContextMenu={(id, title) => {
+            void api
+              .showContextMenu({ kind: 'session', id, title })
+              .then((action) => {
+                if (action === 'delete-session') void remove(id)
+              })
+              .catch((err: unknown) => {
+                console.error('[context-menu] 弹出失败：', err instanceof Error ? err.message : err)
+              })
+          }}
+          onProjectContextMenu={(id, name) => {
+            void api
+              .showContextMenu({ kind: 'project', id, name })
+              .then((action) => {
+                if (action === 'remove-project') void removeProjectById(id)
+              })
+              .catch((err: unknown) => {
+                console.error('[context-menu] 弹出失败：', err instanceof Error ? err.message : err)
+              })
+          }}
+          // 设置是另一个窗口了（macOS ⌘, 的原生做法），不再是这里的一个 state。
+          // 单例、聚焦、重复打开这些都由主进程负责，这边只管喊一声。
+          // .catch 不能省：这个项目已经在 Task 13/15 因为丢 .catch 栽过两次，
+          // 裸 void 的话「点了齿轮什么都没发生」会连日志都没有。
+          onOpenSettings={() =>
+            void api.openSettings().catch((err: unknown) => {
+              console.error('[settings] 打开设置窗口失败：', err instanceof Error ? err.message : err)
+            })
+          }
+          onAddProject={() => void addProject()}
+          onToggleCollapsed={(id) => void toggleCollapsed(id)}
+          onSelectProject={setCurrentProjectId}
         />
         <ChatWindow
           chat={chat}
@@ -285,14 +378,6 @@ export function App() {
           onJumpToBlocking={jumpToBlocking}
         />
       </div>
-      {showSettings && (
-        <SettingsPanel
-          settings={settings}
-          onSave={(p) => saveSettings(p)}
-          onClose={() => setShowSettings(false)}
-          onRestart={() => api.restartApp()}
-        />
-      )}
     </div>
   )
 }

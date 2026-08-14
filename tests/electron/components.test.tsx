@@ -8,8 +8,9 @@ import { ApprovalCard } from '../../electron/renderer/src/components/ApprovalCar
 import { MessageBubble } from '../../electron/renderer/src/components/MessageBubble'
 import { ChatWindow } from '../../electron/renderer/src/components/ChatWindow'
 import { SessionList } from '../../electron/renderer/src/components/SessionList'
+import { UNGROUPED_ID } from '../../electron/main/projects'
 import type { ChatMessage } from '../../electron/renderer/src/chat-reducer'
-import type { ApprovalRequestEvent } from '../../electron/shared/channels'
+import type { ApprovalRequestEvent, SessionGroup } from '../../electron/shared/channels'
 
 const toolEvent = {
   sessionId: 's1',
@@ -245,45 +246,235 @@ describe('ChatWindow', () => {
 })
 
 describe('SessionList', () => {
-  const sessions = [
-    { id: 's1', title: '会话一', updatedAt: 2 },
-    { id: 's2', title: '会话二', updatedAt: 1 },
+  // 侧边栏改成「项目分组 + 嵌套会话」之后，它不再直接吃一个扁平的 sessions 数组，
+  // 而是吃 groupSessions() 分好的 SessionGroup[]（分组规则本身在
+  // projects.test.ts 里单测）。这些用例只管「给定分组，UI 渲染和回调对不对」。
+  const groups: SessionGroup[] = [
+    {
+      id: 'p1',
+      name: '我的项目',
+      dir: '/Users/me/proj',
+      collapsed: false,
+      sessions: [
+        { id: 's1', title: '会话一', updatedAt: 2, projectId: 'p1' },
+        { id: 's2', title: '会话二', updatedAt: 1, projectId: 'p1' },
+      ],
+    },
   ]
 
+  // 删除/移除的入口是原生右键菜单，组件只负责报告「哪一项被右键了」，
+  // 所以这里的桩是 onSessionContextMenu / onProjectContextMenu，
+  // 不再是直接的 onDelete / onRemoveProject。
+  const noop = {
+    onSelect: () => {},
+    onCreate: () => {},
+    onOpenSettings: () => {},
+    onAddProject: () => {},
+    onToggleCollapsed: () => {},
+    onSelectProject: () => {},
+    onSessionContextMenu: () => {},
+    onProjectContextMenu: () => {},
+  }
+
   it('列出所有会话', () => {
-    render(<SessionList sessions={sessions} currentId="s1" onSelect={() => {}} onCreate={() => {}} onDelete={() => {}} onOpenSettings={() => {}} />)
+    render(<SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />)
     expect(screen.getByText('会话一')).toBeTruthy()
     expect(screen.getByText('会话二')).toBeTruthy()
   })
 
   it('当前会话有选中样式', () => {
     const { container } = render(
-      <SessionList sessions={sessions} currentId="s1" onSelect={() => {}} onCreate={() => {}} onDelete={() => {}} onOpenSettings={() => {}} />,
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />,
     )
     expect(container.querySelectorAll('.session--active')).toHaveLength(1)
   })
 
   it('点击会话触发 onSelect', () => {
     const picked: string[] = []
-    render(<SessionList sessions={sessions} currentId="s1" onSelect={(id) => picked.push(id)} onCreate={() => {}} onDelete={() => {}} onOpenSettings={() => {}} />)
+    render(
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} onSelect={(id) => picked.push(id)} />,
+    )
     fireEvent.click(screen.getByText('会话二'))
     expect(picked).toEqual(['s2'])
   })
 
   it('新建按钮触发 onCreate', () => {
     let created = 0
-    render(<SessionList sessions={sessions} currentId="s1" onSelect={() => {}} onCreate={() => created++} onDelete={() => {}} onOpenSettings={() => {}} />)
+    render(
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} onCreate={() => created++} />,
+    )
     fireEvent.click(screen.getByRole('button', { name: /新对话/ }))
     expect(created).toBe(1)
   })
 
-  it('删除按钮触发 onDelete 且不连带触发 onSelect', () => {
-    const deleted: string[] = []
+  // 原来这里测的是行尾那个 ✕：点它触发 onDelete、且不冒泡到行的 onSelect。
+  // 那个按钮已经去掉了，删除改走原生右键菜单，所以这条测试的前提整体换掉：
+  // 现在要守的是「右键会话上报的是这一行的 id 和标题」，删除动作本身由
+  // App.tsx 在菜单返回后调用（那部分是 App 的职责，不在这个组件里）。
+  it('右键会话上报 id 和标题，供上层弹原生菜单', () => {
+    const targets: [string, string][] = []
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        onSessionContextMenu={(id, title) => targets.push([id, title])}
+      />,
+    )
+    fireEvent.contextMenu(screen.getByText('会话二'))
+    expect(targets).toEqual([['s2', '会话二']])
+  })
+
+  it('右键会话不触发 onSelect（右键是「对这一项做点什么」，不是打开它）', () => {
     const picked: string[] = []
-    render(<SessionList sessions={sessions} currentId="s1" onSelect={(id) => picked.push(id)} onCreate={() => {}} onDelete={(id) => deleted.push(id)} onOpenSettings={() => {}} />)
-    fireEvent.click(screen.getAllByRole('button', { name: /删除/ })[1])
-    expect(deleted).toEqual(['s2'])
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        onSelect={(id) => picked.push(id)}
+      />,
+    )
+    fireEvent.contextMenu(screen.getByText('会话二'))
     expect(picked).toEqual([])
+  })
+
+  it('项目名和「项目」区标签都画出来', () => {
+    render(<SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />)
+    expect(screen.getByText('项目')).toBeTruthy()
+    expect(screen.getByText('我的项目')).toBeTruthy()
+  })
+
+  it('点项目行触发 onSelectProject（新会话要落在这个项目下）', () => {
+    const picked: string[] = []
+    render(
+      <SessionList groups={groups} currentId="s1" currentProjectId={null} {...noop} onSelectProject={(id) => picked.push(id)} />,
+    )
+    fireEvent.click(screen.getByText('我的项目'))
+    expect(picked).toEqual(['p1'])
+  })
+
+  it('当前项目有选中样式', () => {
+    const { container } = render(
+      <SessionList groups={groups} currentId={null} currentProjectId="p1" {...noop} />,
+    )
+    expect(container.querySelectorAll('.project__row--active')).toHaveLength(1)
+  })
+
+  // 折叠不再是那个 11px 角标独占的动作 —— 整行点击即折叠/展开，
+  // 同一次点击还会把这个项目标为选中（决定新会话落在哪）。
+  // 这条测试守的正是「一次点击两个语义都发生」，别让谁把它拆回两个目标。
+  it('点击项目行同时触发折叠和选中，且用 aria-expanded 表达状态', () => {
+    const toggled: string[] = []
+    const selected: string[] = []
+    const { rerender } = render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        onToggleCollapsed={(id) => toggled.push(id)}
+        onSelectProject={(id) => selected.push(id)}
+      />,
+    )
+    const row = screen.getByRole('button', { name: /我的项目/ })
+    expect(row.getAttribute('aria-expanded')).toBe('true')
+    fireEvent.click(row)
+    expect(toggled).toEqual(['p1'])
+    expect(selected).toEqual(['p1'])
+
+    const collapsed = [{ ...groups[0], collapsed: true }]
+    rerender(<SessionList groups={collapsed} currentId="s1" currentProjectId="p1" {...noop} />)
+    expect(screen.getByRole('button', { name: /我的项目/ }).getAttribute('aria-expanded')).toBe('false')
+  })
+
+  it('折叠时会话行不渲染，只留一个数量提示', () => {
+    const collapsed = [{ ...groups[0], collapsed: true }]
+    render(<SessionList groups={collapsed} currentId="s1" currentProjectId="p1" {...noop} />)
+    expect(screen.queryByText('会话一')).toBeNull()
+    // 折起来之后用户看不见里面有几条，这个数字让他不必展开就知道值不值得展开
+    expect(screen.getByText('2')).toBeTruthy()
+  })
+
+  it('添加项目按钮触发 onAddProject', () => {
+    let added = 0
+    render(
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} onAddProject={() => added++} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: '添加项目' }))
+    expect(added).toBe(1)
+  })
+
+  // 「移除项目」也从行尾的 ✕ 换成了右键菜单。
+  it('右键项目行上报 id 和名字，供上层弹原生菜单', () => {
+    const targets: [string, string][] = []
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        onProjectContextMenu={(id, name) => targets.push([id, name])}
+      />,
+    )
+    fireEvent.contextMenu(screen.getByRole('button', { name: /我的项目/ }))
+    expect(targets).toEqual([['p1', '我的项目']])
+  })
+
+  it('右键项目行不触发折叠（右键不该改变展开状态）', () => {
+    const toggled: string[] = []
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        onToggleCollapsed={(id) => toggled.push(id)}
+      />,
+    )
+    fireEvent.contextMenu(screen.getByRole('button', { name: /我的项目/ }))
+    expect(toggled).toEqual([])
+  })
+
+  it('「未分组」那一组不给移除按钮（它是兜底分类，不是用户建的东西）', () => {
+    const ungrouped: SessionGroup[] = [
+      { id: UNGROUPED_ID, name: '未分组', dir: null, collapsed: false, sessions: [{ id: 's9', title: '游离会话', updatedAt: 1 }] },
+    ]
+    render(<SessionList groups={ungrouped} currentId="s9" currentProjectId={null} {...noop} />)
+    expect(screen.getByText('游离会话')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /移除项目/ })).toBeNull()
+  })
+
+  it('设置入口是个裸图标按钮（无文字标签，只有 aria-label）', () => {
+    let opened = 0
+    render(
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} onOpenSettings={() => opened++} />,
+    )
+    const gear = screen.getByRole('button', { name: '设置' })
+    // 用户明确要求：只要图标，不要「设置」两个字、也不要那条占满宽度的按钮背景
+    expect(gear.textContent).toBe('')
+    fireEvent.click(gear)
+    expect(opened).toBe(1)
+  })
+
+  it('空项目显示「还没有对话」，让「添加项目」这个动作有可见结果', () => {
+    const empty: SessionGroup[] = [{ ...groups[0], sessions: [] }]
+    render(<SessionList groups={empty} currentId={null} currentProjectId="p1" {...noop} />)
+    expect(screen.getByText('还没有对话')).toBeTruthy()
+  })
+
+  it('一个项目都没有时给引导文案，而不是一片空白', () => {
+    render(<SessionList groups={[]} currentId={null} currentProjectId={null} {...noop} />)
+    expect(screen.getByText(/还没有项目/)).toBeTruthy()
+  })
+
+  it('侧边栏里没有 active:scale 微交互（用户明确要求去掉）', () => {
+    const { container } = render(
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />,
+    )
+    expect(container.querySelector('.sidebar')!.innerHTML).not.toMatch(/active:scale/)
   })
 })
 

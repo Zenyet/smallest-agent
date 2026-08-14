@@ -9,10 +9,17 @@ const mockAPI: ElectronAPI = {
   getSettings: async () => ({}),
   saveSettings: async () => ({}),
   restartApp: async () => {},
+  openSettings: async () => {},
   listSessions: async () => [],
   createSession: async () => 'mock-session',
   deleteSession: async () => {},
   loadSession: async () => [],
+  getProjects: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
+  addProject: async () => null,
+  removeProject: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
+  showContextMenu: async () => null,
+  assignSession: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
+  toggleProjectCollapsed: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
   respondApproval: async () => {},
   detectProviders: async () => [],
   importProvider: async () => null,
@@ -26,6 +33,8 @@ const mockAPI: ElectronAPI = {
   onError: () => () => {},
   onRuntimeStatus: () => () => {},
   onApprovalRequest: () => () => {},
+  onSettingsChanged: () => () => {},
+  onProjectsChanged: () => () => {},
 }
 
 export const api: ElectronAPI = (typeof window !== 'undefined' && window.electronAPI) || mockAPI

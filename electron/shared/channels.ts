@@ -16,6 +16,21 @@ export const CH = {
   getSettings: 'agent:get-settings',
   saveSettings: 'agent:save-settings',
   restartApp: 'agent:restart-app',
+  // 设置窗口：独立 BrowserWindow（macOS 的 ⌘, 原生做法），不是 renderer 里的浮层。
+  // openSettings 是单例的——已经开着就聚焦，不会开出第二个。
+  openSettings: 'agent:open-settings',
+  // 项目分组（会话按本地目录归类）。状态活在主进程的 electron-store 里，
+  // 每个写操作都返回写完之后的完整状态，renderer 不自己推算。
+  getProjects: 'agent:get-projects',
+  addProject: 'agent:add-project',
+  removeProject: 'agent:remove-project',
+  // 右键菜单：renderer 报告「哪一项被右键了」，主进程弹原生菜单，
+  // 把用户选的动作作为返回值给回去（没选就返回 null）。
+  // 做成 invoke/handle 的一次往返而不是「主进程再推一个事件」，
+  // 是因为菜单的结果天然是这次右键的应答，调用方就在原地等它。
+  showContextMenu: 'agent:show-context-menu',
+  assignSession: 'agent:assign-session',
+  toggleProjectCollapsed: 'agent:toggle-project-collapsed',
   // Provider detection（两段式）
   detectProviders: 'agent:detect-providers',
   importProvider: 'agent:import-provider',
@@ -33,6 +48,11 @@ export const CH = {
   cacheHit: 'agent:cache-hit',
   error: 'agent:error',
   runtimeStatus: 'agent:runtime-status',
+  // 设置改了：主进程广播给所有窗口（含设置窗口自己）。两个 renderer 之后，
+  // 谁写的设置谁知道已经不够了 —— 主窗口得从这里听说，否则它手里那份是死的。
+  settingsChanged: 'agent:settings-changed',
+  // 项目状态改了：同上，广播而不是只回给发起那一次 invoke 的窗口。
+  projectsChanged: 'agent:projects-changed',
   // 审批：Main → Renderer 发请求，Renderer → Main 回决定
   approvalRequest: 'agent:approval-request',
   approvalResponse: 'agent:approval-response',
@@ -94,6 +114,10 @@ export interface SessionMeta {
   id: string
   title: string
   updatedAt: number
+  // 所属项目。可选而不是必填：会话文件本身（src/memory/store.ts 写的那个
+  // Message[] JSON）没地方存这个，映射活在 Electron 层自己的持久化里，
+  // 所以「没有项目」是完全正常的状态，归到侧边栏的「未分组」下。
+  projectId?: string
 }
 
 // 写类工具执行前的审批请求。requestId 用来把 Renderer 的回答对上是哪一次请求 ——
@@ -131,5 +155,10 @@ export interface ProviderSecret {
   baseUrl?: string
   model?: string
 }
+
+// 项目分组的类型从 main/projects.ts 转出来，让 renderer 只 import 这一个文件
+// （跟 DesktopSettings 同样的处理）。projects.ts 是纯模块，不 import electron，
+// 从 renderer 引它的类型不会把 electron 拖进 bundle。
+export type { Project, ProjectsState, SessionGroup } from '../main/projects'
 
 export type { Message }
