@@ -32,7 +32,15 @@ export default defineConfig({
     root: resolve(root, 'electron/renderer'),
     plugins: [react(), tailwindcss()],
     build: {
-      rollupOptions: { input: resolve(root, 'electron/renderer/index.html') },
+      rollupOptions: {
+        // 两个 renderer 入口 = 两个 BrowserWindow。设置窗口是独立窗口
+        // （macOS ⌘, 的原生做法）而不是主窗口里的浮层，所以它需要自己的
+        // HTML 和自己的 React 根。共用一份 styles.css，各自挂载。
+        input: {
+          index: resolve(root, 'electron/renderer/index.html'),
+          settings: resolve(root, 'electron/renderer/settings.html'),
+        },
+      },
     },
   },
 })

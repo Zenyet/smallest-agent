@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- CSP 跟主窗口一份：default-src 'self' 挡掉任何外链资源（字体走 npm 打进 bundle）。
+         设置窗口是第二个 renderer，安全策略不能因为"它只是个设置面板"就放松。 -->
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+    <title>设置</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/settings-main.tsx"></script>
+  </body>
+</html>

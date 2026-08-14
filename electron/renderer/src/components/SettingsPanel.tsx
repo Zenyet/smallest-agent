@@ -134,8 +134,15 @@ export function SettingsPanel({
   }
 
   return (
-    // settings 保留作测试锚点；面板盖满窗口，所以是 fixed inset-0。
-    <div className="settings fixed inset-0 z-10 flex flex-col bg-canvas">
+    // settings 保留作测试锚点。
+    // 以前这里是 fixed inset-0 的浮层（盖在主窗口上）；现在面板是独立
+    // BrowserWindow 的内容，所以改成撑满自己那个窗口：h-full + flex-1
+    // 贴着 #root 的 flex h-screen。fixed 在这里已经没有意义 ——
+    // 没有别的东西要被它盖住了。
+    <div className="settings flex h-full min-w-0 flex-1 flex-col bg-canvas">
+      {/* pl-20（80px）是给 macOS 红绿灯让的位：hiddenInset 保留那三个圆点，
+          它们连按钮带边距占左上角约 78px。整条 header 是拖拽区（设置窗口同样
+          没有原生标题栏），右边的关闭按钮单独标 no-drag，否则点不动。 */}
       <header className="flex h-11 items-center justify-between border-b border-line py-2 pr-4 pl-20 [-webkit-app-region:drag]">
         <h2 className="m-0 text-[13px] font-semibold">设置</h2>
         <button
@@ -148,8 +155,10 @@ export function SettingsPanel({
       </header>
 
       <div className="flex min-h-0 flex-1">
-        {/* 左：分组导航，宽度统一为 w-56 与侧边栏一致 */}
-        <nav className="settings__nav flex w-56 flex-none flex-col border-r border-line p-2">
+        {/* 左：分组导航。以前是 w-56（224px）去对齐主窗口的侧边栏，但面板
+            现在住在自己那个 ~700px 宽的窗口里，224px 的导航会把字段区挤窄；
+            四个分组名都很短，w-40 够用。 */}
+        <nav className="settings__nav flex w-40 flex-none flex-col border-r border-line p-2">
           <div className="flex flex-col gap-px">
             {SECTIONS.map((section) => {
               const isActive = section.id === activeSection

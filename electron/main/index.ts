@@ -1,5 +1,5 @@
 import 'dotenv/config'
-import { app, BrowserWindow, ipcMain } from 'electron'
+import { app, BrowserWindow, Menu, ipcMain } from 'electron'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { CH } from '../shared/channels'
@@ -7,9 +7,10 @@ import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
 import { ownServerSpec, fsServerSpec } from './mcp-paths'
 import { createRuntime, type AgentRuntime } from './agent-runtime'
-import { setupIpcHandlers } from './ipc-handlers'
+import { setupIpcHandlers, setupProviderHandlers } from './ipc-handlers'
 import { createApprovalGate } from './approval'
 import { toErrorEvent } from './errors'
+import { buildMenuTemplate } from './app-menu'
 import { loadConfig } from '../../src/config'
 import type { RuntimeStatusEvent } from '../shared/channels'
 
@@ -97,8 +98,94 @@ function createWindow(): BrowserWindow {
   return win
 }
 
+// 设置窗口是独立 BrowserWindow，不是主窗口里的浮层 —— macOS 上 ⌘, 打开一个
+// 独立的偏好设置窗口是系统惯例，浮层是网页味。
+//
+// 单例：模块级变量记住它。用 isDestroyed() 判断而不是靠 'closed' 事件里置 null，
+// 两者都要有（见下面的 closed 监听）—— 光靠事件的话，事件还没派发到之前的
+// 那一瞬间点第二次会拿到一个已销毁的窗口去 focus()，直接抛异常。
+let settingsWin: BrowserWindow | null = null
+
+function openSettingsWindow(): void {
+  if (settingsWin && !settingsWin.isDestroyed()) {
+    // 已经开着：聚焦它，不开第二个。show() 一并调上，覆盖"被最小化了"的情况——
+    // 光 focus() 一个最小化的窗口在 macOS 上什么也不会发生，用户按 ⌘, 像没反应。
+    if (settingsWin.isMinimized()) settingsWin.restore()
+    settingsWin.show()
+    settingsWin.focus()
+    return
+  }
+
+  const win = new BrowserWindow({
+    // 按设置面板本身的内容定尺寸（左 160px 导航 + 右侧字段列），不是主窗口的 1100×760。
+    width: 720,
+    height: 620,
+    // 可缩放但有下限：再窄下去左导航和字段列会互相挤，字段的 hint 文字开始换行成两三行。
+    minWidth: 560,
+    minHeight: 420,
+    // 跟 SettingsPanel 根元素的 bg-canvas 一致（styles.css 的 --color-canvas）。
+    // 不一致的话开窗那一瞬间会闪一下别的颜色。
+    backgroundColor: '#1c1d1f',
+    title: '设置',
+    // 跟主窗口一致：留系统红绿灯、标题栏自己画。
+    // 代价是这个窗口也要自己给红绿灯让位（SettingsPanel 的 header 有 pl-20）
+    // 和自己画拖拽区（那条 header 整条是 drag）。
+    titleBarStyle: 'hiddenInset',
+    titleBarOverlay: { color: '#1c1d1f', symbolColor: '#a5a8ad', height: 36 },
+    webPreferences: {
+      // 两个窗口共用同一个 preload：暴露的 API 是同一套，设置窗口只是少用几个。
+      // contextIsolation / nodeIntegration 的安全姿势跟主窗口一模一样，
+      // 不因为"它只是个设置面板"就放松。
+      preload: join(here, '../preload/preload.cjs'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  })
+  settingsWin = win
+
+  if (process.env.ELECTRON_RENDERER_URL) {
+    // dev server 下第二个入口是 /settings.html（electron.vite.config.ts 的
+    // renderer.build.rollupOptions.input 里那个 settings 入口）。
+    win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/settings.html`)
+  } else {
+    win.loadFile(join(here, '../renderer/settings.html'))
+  }
+
+  // 关掉之后把引用清干净，下次 ⌘, 重新建一个。不清的话下次会走进上面那个
+  // "已经开着"分支，拿一个已销毁的窗口去 focus()。
+  win.on('closed', () => {
+    if (settingsWin === win) settingsWin = null
+  })
+}
+
+// 广播给所有窗口。设置改动必须走这条路而不是只回给发起 invoke 的那个窗口：
+// 两个 renderer 之后，"谁写的谁知道"已经不够了 —— 主窗口得从广播里听说。
+function broadcast(channel: string, payload: unknown): void {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) win.webContents.send(channel, payload)
+  }
+}
+
 app.whenReady().then(async () => {
   ipcMain.handle(CH.ping, () => 'pong')
+
+  // openSettings 跟 ping 一样尽早注册、不等 createRuntime：设置窗口的入口
+  // （侧边栏齿轮、⌘,）在启动画面期间就该能用 —— 启动失败最常见的原因就是
+  // 没配 API Key，那时候设置窗口正是用户唯一的出路。
+  ipcMain.handle(CH.openSettings, () => openSettingsWindow())
+
+  // 菜单同理，在 createRuntime 之前就装上，否则启动那几十秒里 ⌘, 是死键。
+  // 加速键挂在菜单项上而不是 globalShortcut（那是系统级的，会把 ⌘, 从别的
+  // 应用手里抢走）—— 见 app-menu.ts 顶部的说明。
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate(
+      buildMenuTemplate({
+        platform: process.platform,
+        appName: app.getName(),
+        onOpenSettings: openSettingsWindow,
+      }) as Electron.MenuItemConstructorOptions[],
+    ),
+  )
 
   const win = createWindow()
   // 最近一次状态的快照。sendStatus 只在状态真的变化时调用一次，是"推送"；
@@ -108,8 +195,11 @@ app.whenReady().then(async () => {
   let lastStatus: RuntimeStatusEvent = { phase: 'embedding', detail: '启动中…' }
   const sendStatus = (status: RuntimeStatusEvent) => {
     lastStatus = status
-    // 窗口可能已被关闭，发送前检查，避免 "Object has been destroyed"
-    if (!win.isDestroyed()) win.webContents.send(CH.runtimeStatus, status)
+    // 广播而不是只发主窗口：设置窗口也要知道 phase —— 它在 phase 落定
+    // （ready 或 failed）之前不敢拉设置，否则 getSettings 的 handler 还没注册，
+    // invoke 会砸在 "No handler registered" 上，面板永远停在「读取设置中…」。
+    // broadcast 内部逐个查 isDestroyed，不会碰已销毁的窗口。
+    broadcast(CH.runtimeStatus, status)
   }
   // 尽早注册，跟 CH.ping 一样不等 waitForInitialLoad——reload 场景下 renderer 会在
   // 主进程早已跑过 createRuntime 之后才重新挂载，这时候它问的第一件事就是"现在到哪了"，
@@ -176,7 +266,10 @@ app.whenReady().then(async () => {
       sendStatus,
     )
 
-    const runnerInterface = setupIpcHandlers(win, runtime, paths, gate, () => restarting)
+    // win 用来发 agent 事件（chunk/toolCall/approval 这些只有主窗口关心）；
+    // broadcast 用来发设置和项目的变更（所有窗口都要知道）。两者分开传，
+    // 免得 ipc-handlers 自己去 import electron 的 BrowserWindow 找别的窗口。
+    const runnerInterface = setupIpcHandlers(win, runtime, paths, gate, () => restarting, broadcast)
 
     // 健康路径的重启：只允许在没有活跃工作（运行中的 turn 或待审批）时调用。
     // Task 14 把 restartApp 移到失败态专用是为了避免不加防护的"随时可 quit"——
@@ -220,13 +313,25 @@ app.whenReady().then(async () => {
     const failure = toErrorEvent('default', err)
     sendStatus({ phase: 'failed', detail: failure.message })
 
-    // 走到这里说明 setupIpcHandlers 没跑过，三个 handler 都还没注册。
+    // 走到这里说明 setupIpcHandlers 没跑过，那些 handler 都还没注册。
     // 不补上的话，renderer 侧对应的 ipcRenderer.invoke 会因为
     // "No handler registered" 而 reject，且 App.tsx 目前的调用方式会让它成为静默的
     // unhandled rejection——用户点发送后毫无反馈，跟卡在启动界面几乎无法区分。
     // 补一个最小可用版本：设置项照常可读写；发消息则明确回一条 error 事件。
+    //
+    // 这条路径现在更重要了：设置搬进独立窗口之后，启动失败时用户唯一的出路
+    // 就是 ⌘, 开设置去改配置（最常见的失败原因正是没配 API Key）。
+    // 所以除了读写设置，provider 探测/导入也要补上 —— 面板挂载时就会调
+    // detectProviders，而「从 Claude Code 导入」往往是修好这次失败最快的办法。
     ipcMain.handle(CH.getSettings, () => getSettings())
-    ipcMain.handle(CH.saveSettings, (_e, patch) => saveSettings(patch))
+    ipcMain.handle(CH.saveSettings, (_e, patch) => {
+      const next = saveSettings(patch)
+      // 广播，跟健康路径一致：设置窗口自己也订阅这条，靠它把 needsRestart 的
+      // 比较基线推进（否则保存成功后重启警告不会消失）。
+      broadcast(CH.settingsChanged, next)
+      return next
+    })
+    setupProviderHandlers()
     ipcMain.handle(CH.sendMessage, (_e, sessionId: string) => {
       if (!win.isDestroyed()) win.webContents.send(CH.error, { ...failure, sessionId })
     })
@@ -247,6 +352,9 @@ app.whenReady().then(async () => {
   })
 })
 
+// macOS 上关掉所有窗口不退出应用（dock 图标还在，⌘Tab 回来能继续）。
+// 注意这里的"所有窗口"现在包括设置窗口：只剩设置窗口开着时不算 all-closed，
+// 应用照常活着，符合预期。
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit()
 })
