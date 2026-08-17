@@ -1,0 +1,55 @@
+# ============================================================================
+# workspace 根清单
+# ----------------------------------------------------------------------------
+# 拆两个 crate 的理由：core 不依赖 gpui。gpui 是从 zed 仓库拉的 git 依赖，
+# 首次编译要几分钟，改一行 agent 逻辑不该等它。core 独立跑 cargo test，
+# 秒级反馈；ui 只在动界面时才编译。
+#
+# ui crate 等 core 跑通再加进 members。
+# ============================================================================
+
+[workspace]
+resolver = "3"
+members = ["core", "cli", "ui"]
+
+[workspace.package]
+edition = "2024"
+version = "0.0.0"
+license = "MIT"
+
+# 依赖版本统一在这里钉，成员 crate 用 workspace = true 引用，
+# 避免两个 crate 各自升版本导致重复编译同一个库的多个版本。
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+futures-util = "0.3"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+# MCP 官方 Rust SDK。不要默认 features（含 server 和 macros，我们只做客户端）。
+# ACP：驱动外部 agent CLI（claude code / codex / opencode…）。
+# 走标准协议而不是每家一个 driver —— waku 那边有 12 个 driver 文件是因为它用
+# 各家原生协议，走 ACP 的话一个实现覆盖所有支持它的 CLI。
+agent-client-protocol = "2.0.0"
+rmcp = { version = "3.1.2", default-features = false, features = [
+    "client",
+    "transport-child-process",
+] }
+# rustls 而不是系统 native-tls：少一个系统 OpenSSL 依赖，交叉编译也省事。
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }
+# 只要够跑 reqwest 的那几个 feature。core 自己不建运行时给别人用，
+# 只在 llm 那一层建一个专用的（见 llm/mod.rs 的运行时接缝说明）。
+# rt-multi-thread 是必需的：current_thread 运行时要靠外部 block_on 才推进，
+# 光 spawn 不动；多线程运行时自带后台线程驱动任务，spawn 完就能跑。
+tokio = { version = "1", features = [
+    "rt",
+    "rt-multi-thread",
+    "net",
+    "time",
+    "sync",
+    "macros",
+] }

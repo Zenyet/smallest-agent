@@ -1,0 +1,19 @@
+[package]
+name = "smallest-agent-cli"
+description = "终端里跑 agent 的最小入口，用来在接 gpui 之前验证 core 真能工作。"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "smallest-agent"
+path = "src/main.rs"
+
+[dependencies]
+smallest-agent-core = { path = "../core" }
+anyhow.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "io-std", "io-util"] }
+# 只为 Ctrl-C 的 signal handler，不值得为它引 ctrlc crate
+libc = "0.2"
+async-trait.workspace = true

@@ -1,0 +1,46 @@
+[package]
+name = "smallest-agent-ui"
+description = "gpui 桌面前端。逻辑全在 core，这里只管渲染和交互。"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "smallest-agent-app"
+path = "src/main.rs"
+
+[dependencies]
+smallest-agent-core = { path = "../core" }
+anyhow.workspace = true
+
+# gpui 及其组件库都只在 git 上，没发 crates.io。
+#
+# ## 为什么这里不写 rev（踩过的坑）
+#
+# 直觉上该写 `rev = "..."` 钉死版本。实际不行：gpui-component 自己依赖
+# gpui 时写的是不带 rev 的 `git = ".../zed"`，而 cargo 把
+#
+#   git+https://github.com/zed-industries/zed?rev=0ad5441...#0ad5441...
+#   git+https://github.com/zed-industries/zed#0ad5441...
+#
+# 当成**两个不同的源**——即使解析到同一个 commit，也会各编一份 gpui，
+# 于是 Root 实现的是「另一份 gpui 的 Render」，报
+# "the trait `gpui::Render` is not implemented for `gpui_component::Root`"
+# 外加一句 "there are multiple different versions of crate `gpui`"。
+#
+# 所以依赖声明必须和 gpui-component 逐字一致（都不带 rev），版本改由
+# Cargo.lock 钉——lock 文件记的是精确 commit sha，提交进仓库就能复现构建。
+# 升级是显式动作：cargo update -p gpui，然后跑测试。
+#
+# 换句话说「钉版本」这个诉求没变，只是落在 lock 而不是 manifest。
+gpui = { git = "https://github.com/zed-industries/zed" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
+    "font-kit",
+] }
+gpui-component = { git = "https://github.com/longbridge/gpui-component" }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+# 事件通道：接收端要在 gpui 的执行器上 await，tokio 的 channel 不行。
+# 见 src/bridge.rs 文件头。
+smol = "2"
+serde.workspace = true
+serde_json.workspace = true
