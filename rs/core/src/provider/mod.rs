@@ -31,6 +31,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
+use crate::agent::OnComplete;
 use crate::cancel::CancelToken;
 use crate::types::{Args, Message};
 
@@ -74,13 +75,65 @@ pub type EventSink = Arc<dyn Fn(TurnEvent) + Send + Sync>;
 /// 要权限模式），位置参数迟早排到七八个。
 pub struct TurnRequest {
     pub question: String,
+    /// 这一轮属于**哪个会话**（我们自己的会话 id，不是 ACP 那边的）。
+    ///
+    /// ## 为什么 provider 必须知道会话 id
+    ///
+    /// 一个 provider 实例服务多个会话 —— 外部 CLI 的实例是按
+    /// (provider, 模型) 缓存的，因为起一个 node 子进程要几秒，不能每个会话
+    /// 起一个。但「共用子进程」不等于「共用对话」：ACP 协议本身支持一个连接上
+    /// 开多个 session，所以子进程可以共用，会话必须分开。
+    ///
+    /// 不带这个字段的后果是实测过的那类 bug：两个会话都走 claude code 时，
+    /// 它们发到同一个 ACP session 上，B 的提问带着 A 的上下文回答。
+    /// 界面上是两条独立的对话，CLI 那侧是一条 —— 而这个错完全看不见，
+    /// 只表现成「模型莫名提到我没说过的事」。
+    ///
+    /// 内置 provider 用不上（它无状态，历史由 history 显式给），
+    /// 但字段放在请求上而不是构造参数上，正是因为它**每轮都可能不同**。
+    pub session_id: String,
     /// 之前的对话。
     ///
     /// 内置 provider 每轮都把完整历史发给模型（无状态）；ACP 那边 CLI 自己
     /// 维护会话，所以只在**新建会话**时需要它。两种语义不同，但都要这个字段。
     pub history: Vec<Message>,
+    /// 跑完把完整消息存回会话文件。
+    ///
+    /// 在请求上而不是在 provider 上，理由同 session_id：外部 provider 实例
+    /// 跨会话复用，而存盘钩子是绑会话的（它知道写哪个文件）。
+    /// 挂在实例上就意味着「上一个会话的钩子被下一个会话用着」。
+    pub on_complete: Option<Arc<dyn OnComplete>>,
     pub events: EventSink,
     pub cancel: CancelToken,
+}
+
+impl TurnRequest {
+    /// 最小构造：只有问题和事件去处。测试和 CLI 用得上。
+    pub fn new(question: impl Into<String>, events: EventSink, cancel: CancelToken) -> Self {
+        Self {
+            question: question.into(),
+            session_id: "default".into(),
+            history: Vec::new(),
+            on_complete: None,
+            events,
+            cancel,
+        }
+    }
+
+    pub fn with_session(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = session_id.into();
+        self
+    }
+
+    pub fn with_history(mut self, history: Vec<Message>) -> Self {
+        self.history = history;
+        self
+    }
+
+    pub fn with_on_complete(mut self, on_complete: Arc<dyn OnComplete>) -> Self {
+        self.on_complete = Some(on_complete);
+        self
+    }
 }
 
 /// 「谁来跑这一轮」。

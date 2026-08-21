@@ -139,7 +139,7 @@ fn tools_are_ordered_deterministically() {
 #[test]
 fn omits_tools_key_when_registry_empty() {
     // 空注册表不能发 "tools": []，部分兼容实现对空数组处理不一致
-    let body = build_request("m", 0.0, &[], &BTreeMap::new(), false);
+    let body = build_request("m", 0.0, &[], &BTreeMap::new(), false, &Default::default());
     assert!(body.get("tools").is_none());
 }
 
@@ -153,6 +153,7 @@ fn request_carries_model_temperature_and_stream_flag() {
         }],
         &registry(&["search"]),
         true,
+        &Default::default(),
     );
     assert_eq!(body["model"], "deepseek-chat");
     assert_eq!(body["temperature"], 0.7);
@@ -219,4 +220,74 @@ fn parse_args_rejects_non_object_and_malformed() {
             .to_string()
             .contains("不是合法 JSON")
     );
+}
+
+// ============================================================================
+// 厂商自带的联网搜索
+// ----------------------------------------------------------------------------
+// 这几条锁的是「一把 key 就能用」那条主线：用户配了模型的 key 之后
+// 搜索就该能用，不必再去注册一家搜索服务。
+// 各家开关形状不同，写错的后果是**静默不搜**（请求仍然成功，只是没联网），
+// 那种缺陷在界面上完全看不出来。
+// ============================================================================
+
+#[test]
+fn native_search_none_adds_nothing() {
+    use smallest_agent_core::vendors::SearchSupport;
+    let body = build_request("m", 0.0, &[], &BTreeMap::new(), false, &SearchSupport::None);
+    assert!(body.get("enable_search").is_none());
+    // tools 为空时整个字段要省掉 —— 见 build_request 的注释
+    assert!(body.get("tools").is_none());
+}
+
+#[test]
+fn enable_flag_backend_sets_a_boolean() {
+    // 阿里 DashScope 是这种
+    use smallest_agent_core::vendors::SearchSupport;
+    let body = build_request("m", 0.0, &[], &BTreeMap::new(), false, &SearchSupport::EnableFlag);
+    assert_eq!(body["enable_search"], true);
+}
+
+#[test]
+fn tool_type_backend_appends_a_tool_entry() {
+    // 智谱 / OpenRouter 是这种
+    use smallest_agent_core::vendors::SearchSupport;
+    let body = build_request(
+        "m",
+        0.0,
+        &[],
+        &BTreeMap::new(),
+        false,
+        &SearchSupport::ToolType("openrouter:web_search".into()),
+    );
+    let tools = body["tools"].as_array().expect("该有 tools");
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0]["type"], "openrouter:web_search");
+}
+
+#[test]
+fn native_search_coexists_with_our_own_tools() {
+    // 服务端搜索是**追加**在我们的工具之后，不能把它们挤掉 ——
+    // 覆盖的话 agent 会突然失去文件和命令能力
+    use smallest_agent_core::vendors::SearchSupport;
+    use std::sync::Arc;
+    let mut reg: smallest_agent_core::types::ToolRegistry = BTreeMap::new();
+    smallest_agent_core::skills::register(&mut reg);
+    let n = reg.len();
+    assert!(n > 0);
+
+    let body = build_request(
+        "m",
+        0.0,
+        &[],
+        &reg,
+        false,
+        &SearchSupport::ToolType("web_search".into()),
+    );
+    let tools = body["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), n + 1, "自带搜索该是追加，不是替换");
+    // 我们的工具是 function 型，自带那个是 type 型，两者并存
+    assert!(tools.iter().any(|t| t["type"] == "web_search"));
+    assert!(tools.iter().any(|t| t["type"] == "function"));
+    let _ = Arc::<()>::default;
 }

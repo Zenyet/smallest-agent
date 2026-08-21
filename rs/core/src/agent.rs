@@ -277,8 +277,18 @@ pub async fn run_agent(user_input: &str, deps: AgentDeps) -> Result<String> {
                     ApprovalOutcome::Selected(id) if id == "allow" => {
                         run_tool(&deps.tools, &call.name, &call.args).await
                     }
+                    // `denied` 这个字段是给**界面**看的，不只是给模型看的。
+                    //
+                    // 光有 error 的话，「你拒绝了这一步」和「工具自己挂了」
+                    // 在历史里长得一模一样（都是 {"error":...}），
+                    // 回看时分不出当时是自己按了拒绝还是真出了故障。
+                    // 多一个字段，界面就能把前者显示成「已拒绝」而不是报错。
+                    //
+                    // error 保留：模型读的是它，改成别的键会让模型
+                    // 看不懂这次调用为什么没结果。
                     _ => serde_json::json!({
-                        "error": "用户拒绝了这个操作"
+                        "error": "用户拒绝了这个操作",
+                        "denied": true,
                     })
                     .to_string(),
                 }

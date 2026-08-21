@@ -66,17 +66,20 @@ async fn main() -> Result<()> {
             .await?,
         )
     };
-    let tools = match &mcp {
-        Some(m) => {
-            eprintln!(
-                "\x1b[2m[{} 个工具可用：{}]\x1b[0m",
-                m.tools.len(),
-                m.tools.keys().cloned().collect::<Vec<_>>().join(", ")
-            );
-            m.tools.clone()
-        }
+    let mut tools = match &mcp {
+        Some(m) => m.tools.clone(),
         None => ToolRegistry::new(),
     };
+    // 技能工具（list_skills / read_skill）。装在 MCP 工具之后 ——
+    // 名字不会撞（MCP 工具带 server 前缀），顺序只影响发给模型的列表顺序。
+    smallest_agent_core::skills::register(&mut tools);
+    if !tools.is_empty() {
+        eprintln!(
+            "\x1b[2m[{} 个工具可用：{}]\x1b[0m",
+            tools.len(),
+            tools.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
 
     // Ctrl-C 走取消而不是直接杀进程：杀进程会在写会话文件的中途断掉，
     // 留下半个 JSON（下次加载会当损坏文件跳过，这一轮对话就丢了）。
@@ -114,11 +117,12 @@ async fn main() -> Result<()> {
             config.max_context_tokens as usize,
             config.keep_recent,
             summarizer,
-        )))
-        .with_on_complete(Arc::new(SaveSessionHook::new(
-            store,
-            config.session_id.clone(),
         )));
+    // 存盘钩子挂在**请求**上而不是 provider 上：它绑一个会话，而 provider
+    // 实例是跨会话复用的（见 TurnRequest::on_complete 的注释）。
+    // CLI 一次只跑一个会话，所以这里没差别，但两边用同一套接线更好读。
+    let on_complete: Arc<dyn smallest_agent_core::agent::OnComplete> =
+        Arc::new(SaveSessionHook::new(store, config.session_id.clone()));
 
     // 事件直接打终端。这是和桌面版唯一的差别 —— 那边发 channel 给主线程。
     let stream = config.stream;
@@ -151,12 +155,12 @@ async fn main() -> Result<()> {
     });
 
     let answer = match provider
-        .run_turn(TurnRequest {
-            question,
-            history,
-            events,
-            cancel,
-        })
+        .run_turn(
+            TurnRequest::new(question, events, cancel)
+                .with_session(config.session_id.clone())
+                .with_history(history)
+                .with_on_complete(on_complete),
+        )
         .await
     {
         Ok(text) => text,

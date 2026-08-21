@@ -15,7 +15,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::agent::{AgentDeps, Compact, OnComplete, TurnInfo, run_agent};
+use crate::agent::{AgentDeps, Compact, TurnInfo, run_agent};
 use crate::approval::{Approver, DenyAll};
 use crate::cache::{Cached, DiskCache};
 use crate::cancel::CancelToken;
@@ -35,7 +35,6 @@ pub struct BuiltinProvider {
     base: HttpCallModel,
     tools: ToolRegistry,
     compact: Option<Arc<dyn Compact>>,
-    on_complete: Option<Arc<dyn OnComplete>>,
     /// 危险工具执行前问谁。默认拒绝 —— 安全默认值。
     approver: Arc<dyn Approver>,
 }
@@ -48,18 +47,12 @@ impl BuiltinProvider {
             base,
             tools,
             compact: None,
-            on_complete: None,
             approver: Arc::new(DenyAll),
         })
     }
 
     pub fn with_compact(mut self, compact: Arc<dyn Compact>) -> Self {
         self.compact = Some(compact);
-        self
-    }
-
-    pub fn with_on_complete(mut self, on_complete: Arc<dyn OnComplete>) -> Self {
-        self.on_complete = Some(on_complete);
         self
     }
 
@@ -137,8 +130,12 @@ impl Provider for BuiltinProvider {
         let TurnRequest {
             question,
             history,
+            on_complete,
             events,
             cancel,
+            // 内置 agent 无状态：历史每轮显式传进来，会话 id 只对
+            // 「自己维护上下文」的 provider 有意义（见 TurnRequest 的注释）。
+            session_id: _,
         } = req;
 
         let call_model = self.build_stack(cancel.clone(), &events)?;
@@ -167,8 +164,8 @@ impl Provider for BuiltinProvider {
         if let Some(c) = &self.compact {
             deps = deps.with_compact(c.clone());
         }
-        if let Some(oc) = &self.on_complete {
-            deps = deps.with_on_complete(oc.clone());
+        if let Some(oc) = on_complete {
+            deps = deps.with_on_complete(oc);
         }
 
         run_agent(&question, deps).await

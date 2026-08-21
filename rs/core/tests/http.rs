@@ -62,6 +62,7 @@ fn config(base_url: &str) -> Config {
         base_url: base_url.to_string(),
         model: "deepseek-chat".into(),
         temperature: 0.0,
+        native_search: Default::default(),
         max_turns: 10,
         system_prompt: "测试".into(),
         embedding_model: String::new(),

@@ -53,3 +53,64 @@ tokio = { version = "1", features = [
     "sync",
     "macros",
 ] }
+
+# ============================================================================
+# 编译 profile —— 为什么 dev 也要开优化
+# ----------------------------------------------------------------------------
+# 起因是个实测出来的误判：`cargo run` 出来的 app 滚动明显比 Electron 版卡，
+# 而我一开始以为是渲染写法的问题（阴影、输入框数量），查了两轮才发现
+# **在拿一个没优化的 Rust 构建和一个生产构建的 Electron 比**。
+#
+# 这个比较从一开始就不公平：
+#
+#   • `cargo run` 默认是 dev profile，opt-level = 0 —— 边界检查全在、
+#     迭代器一层都没内联、泛型全是实打实的函数调用
+#   • `electron-vite dev` 那边的 JS 仍然走 V8 的 JIT，热路径（滚动就是
+#     最热的那种）几十毫秒内就被优化成机器码。Blink 的布局和合成是
+#     **release 编译好的 C++**，dev 模式不会让它变慢
+#
+# 所以「dev 的 Rust」对上的是「release 的 C++ + JIT 的 JS」。
+#
+# ## 为什么按 package 开而不是整体 opt-level = 3
+#
+# 整体开优化会让改一行 ui 代码的重编译从几秒变成几十秒，而慢的不是
+# 我们自己那几千行 —— 滚动一帧的时间几乎全花在**布局和文字整形**上，
+# 那些都在第三方 crate 里。它们不怎么改，编译一次就一直用着。
+#
+# 这也是 zed 自己的做法（它的 Cargo.toml 里 taffy / resvg / tree-sitter
+# 都在 profile.dev.package 里开到 3）。挑的这几个就是每帧都要跑的：
+#
+#   taffy      flexbox 布局引擎，每帧对每个元素算一遍
+#   rustybuzz  文字整形（把字符变成字形 + 位置）
+#   ttf-parser rustybuzz 底下读字体表的
+#   smallvec   布局和文字那两条路上到处在用的小数组
+#   resvg / tiny-skia   图标是 SVG，每个都要栅格化
+#   zed-font-kit        字体加载与匹配
+#   markdown   气泡里的 markdown 解析
+#
+# 剩下的（我们自己的代码、reqwest、tokio）保持 opt-level = 0，
+# 因为它们不在渲染路径上，而调试体验和编译速度更值钱。
+#
+# 注意：这只是把 dev 和 release 的差距**缩小**。真要评估性能得跑
+# `cargo build --release`，这几行不是它的替代品。
+# ============================================================================
+[profile.dev.package]
+taffy = { opt-level = 3 }
+rustybuzz = { opt-level = 3 }
+ttf-parser = { opt-level = 3 }
+smallvec = { opt-level = 3 }
+resvg = { opt-level = 3 }
+tiny-skia = { opt-level = 3 }
+# 名字是 zed-font-kit 而不是 font-kit —— zed 用的是它自己 fork 的那个。
+# 写错的话 cargo 只给一句 "did not match any packages" 的 warning，
+# 然后这一行静默失效
+zed-font-kit = { opt-level = 3 }
+markdown = { opt-level = 3 }
+
+# gpui 自己也开一档。
+#
+# opt-level = 1 而不是 3：gpui 很大，开到 3 首次编译要多等好几分钟，
+# 而 1 已经拿到大部分收益（内联 + 去掉最蠢的那些边界检查）。
+# 3 留给上面那几个小而热的 crate。
+[profile.dev.package.gpui]
+opt-level = 1

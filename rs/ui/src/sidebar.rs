@@ -17,7 +17,7 @@ use gpui::*;
 use gpui_component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_component::{Icon, IconName};
 
-use crate::chat::{DeleteSession, RemoveProject};
+use crate::chat::{DeleteSession, RemoveProject, RenameSession};
 use crate::projects::{SessionGroup, UNGROUPED_ID};
 use crate::theme::{FontSize, Radius, Tokens};
 
@@ -43,9 +43,18 @@ pub struct SidebarProps<'a> {
     /// 设置页打开时侧边栏换成分区导航（waku 的做法）。
     /// None = 显示会话列表。
     pub settings_section: Option<crate::settings::SettingsSection>,
+    /// 用户改过的标题。没有记录的会话用 SessionMeta 里那个自动推导的。
+    pub titles: &'a crate::session_titles::Titles,
+    /// 正在重命名哪个会话（id + 那一行临时变成的输入框）。
+    pub renaming: Option<(
+        &'a str,
+        &'a gpui::Entity<gpui_component::input::TextareaState>,
+    )>,
     /// 当前选中的项目：决定新会话落在哪儿。
     /// 跟 current_id 是两件事 —— 用户可以选中一个项目却不打开它下面任何会话。
     pub current_project_id: Option<&'a str>,
+    /// 内容区当前显示哪个页面。用来高亮下面那四行。
+    pub pane: crate::pane::Pane,
 }
 
 /// 无参回调（新对话、添加项目）。
@@ -72,7 +81,15 @@ pub struct SidebarCallbacks<T> {
     pub on_select_settings_section: SectionAction<T>,
     /// 从设置返回对话
     pub on_close_settings: Action<T>,
+    /// 切到某个独立页面（「工具」「技能」「Agent」「自动化」四行用）。
+    ///
+    /// 这四行以前是「打开设置并跳到某一页」，现在是**独立页面** ——
+    /// 见 pane.rs 的文件头。区别在于它们不会换掉侧边栏。
+    pub on_open_page: PaneAction<T>,
 }
+
+/// 切页面的回调。
+pub type PaneAction<T> = Box<dyn Fn(&mut T, crate::pane::Pane, &mut Window, &mut Context<T>)>;
 
 pub fn render_sidebar<T: 'static>(
     props: SidebarProps<'_>,
@@ -88,11 +105,14 @@ pub fn render_sidebar<T: 'static>(
         on_open_settings,
         on_select_settings_section,
         on_close_settings,
+        on_open_page,
     } = cb;
     // Rc 是因为这些闭包要分发进多个行的 listener 里
     let on_select = std::rc::Rc::new(on_select);
     let on_toggle = std::rc::Rc::new(on_toggle_collapsed);
     let on_select_project = std::rc::Rc::new(on_select_project);
+    // 那四行共用它
+    let on_open_page = std::rc::Rc::new(on_open_page);
 
     // 设置页打开时侧边栏换成分区导航。
     //
@@ -115,6 +135,7 @@ pub fn render_sidebar<T: 'static>(
     if props.groups.is_empty() {
         list = list.child(
             div()
+                .w_full()
                 .px_2()
                 .py_1()
                 .text_size(FontSize::xxs())
@@ -134,7 +155,12 @@ pub fn render_sidebar<T: 'static>(
         let on_toggle = on_toggle.clone();
         let on_select_project = on_select_project.clone();
 
-        let mut block = div().flex().flex_col().gap(px(1.));
+        // w_full 是必须的，不能靠 flex 的默认 stretch。
+        //
+        // 父容器（list）是 overflow_y_scroll —— 滚动容器的子元素在内容
+        // 超出时不再 stretch 到容器宽度，而是收缩成内容宽度。表现出来就是
+        // 会话列表长了之后每一行的背景块宽度跟着标题长短变，看着乱。
+        let mut block = div().w_full().flex().flex_col().gap(px(1.));
 
         // 项目行：整行一次点击同时做两件事 —— 选中这个项目 + 折叠/展开。
         //
@@ -144,6 +170,7 @@ pub fn render_sidebar<T: 'static>(
         // 点击面积太小还得瞄准。别改回两个目标 —— 角标现在纯粹是状态指示。
         let mut row = div()
             .id(SharedString::from(format!("group-{}", group.id)))
+            .w_full()
             .flex()
             .h(px(ROW_HEIGHT))
             .items_center()
@@ -234,9 +261,10 @@ pub fn render_sidebar<T: 'static>(
                 // 那次「添加项目」看起来就像什么都没发生。
                 block = block.child(
                     div()
-                        .ml(px(14.))
+                        .w_full()
                         .py_1()
-                        .pl_2()
+                        // 和会话行同样的缩进，保持左边缘对齐
+                        .pl(px(20.))
                         .text_size(FontSize::xxs())
                         .font_weight(FontWeight::NORMAL)
                         .text_color(Tokens::ink_3())
@@ -251,31 +279,78 @@ pub fn render_sidebar<T: 'static>(
                 // Electron 版有那条线，但在 gpui 里它落在整数像素上、又紧贴
                 // 圆角的行背景，折叠展开时会看到线头突出来。缩进 + 选中态的
                 // 背景块已经把层级说清楚了，线是多余的噪音。
-                let mut ul = div().ml(px(14.)).flex().flex_col().gap(px(1.));
+                // **容器不缩进** —— 缩进做在行内容上（下面那个 pl）。
+                //
+                // 这样子项的背景块和项目行一样宽，hover / 选中态的色块左右
+                // 都齐平；层级靠内容的缩进表达。VS Code 的文件树就是这么做的。
+                //
+                // 反过来（容器 ml + 行撑满容器）会让子项的背景块窄一圈，
+                // 两行的色块对不齐，看着像没对准。
+                let mut ul = div().w_full().flex().flex_col().gap(px(1.));
 
                 for s in &group.sessions {
                     let is_active = s.id == props.current_id;
+                    // 用户改过就用他的标题
+                    let display_title = props
+                        .titles
+                        .get(&s.id)
+                        .cloned()
+                        .unwrap_or_else(|| s.title.clone());
+
+                    // 这一行正在被重命名：换成输入框而不是文字。
+                    //
+                    // 就地编辑而不是弹对话框 —— 重命名是个轻动作，
+                    // 弹窗要用户先看清标题再点确定，反而多两步。
+                    if let Some((rid, input)) = props.renaming
+                        && rid == s.id
+                    {
+                        ul = ul.child(
+                            div()
+                                .w_full()
+                                .flex()
+                                .h(px(ROW_HEIGHT))
+                                .items_center()
+                                .pl(px(20.))
+                                .pr(px(6.))
+                                .child(gpui_component::input::Textarea::new(input)),
+                        );
+                        continue;
+                    }
                     let sid = s.id.clone();
                     let sid_del = s.id.clone();
+                    let sid_ren = s.id.clone();
                     let on_select = on_select.clone();
                     ul = ul.child(
                         div()
                             .id(SharedString::from(format!("session-{}", s.id)))
+                            .w_full()
                             .flex()
                             .h(px(ROW_HEIGHT))
                             .items_center()
                             .gap(px(6.))
-                            .px_2()
+                            // 右 padding 和项目行一致；左边额外加缩进表达层级。
+                            // 6 + 14 = 20，正好让标题从项目名的「文件夹图标」
+                            // 之后开始，视觉上挂在它下面。
+                            .pl(px(20.))
+                            .pr(px(6.))
                             .rounded(Radius::control())
                             .cursor_pointer()
                             .text_size(FontSize::sm())
-                            .when(is_active, |d| {
-                                d.bg(Tokens::surface()).text_color(Tokens::ink())
+                            // 选中态只靠**文字提亮**，不给背景色。
+                            //
+                            // 项目行才用背景块 —— 侧边栏里同时出现两种背景块
+                            // （选中的项目 + 选中的会话）会让人不确定哪个是
+                            // 「当前在看的」。会话是叶子节点，提亮就够。
+                            //
+                            // hover 仍然给背景：那是「指针在这」的即时反馈，
+                            // 和「这是当前选中的」是两件事，不冲突。
+                            .text_color(if is_active {
+                                Tokens::ink()
+                            } else {
+                                Tokens::ink_2()
                             })
-                            .when(!is_active, |d| {
-                                d.text_color(Tokens::ink_2())
-                                    .hover(|s| s.bg(Tokens::hover()))
-                            })
+                            .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                            .hover(|s| s.bg(Tokens::hover()))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(move |this, _, window, cx| {
@@ -288,7 +363,7 @@ pub fn render_sidebar<T: 'static>(
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
-                                    .child(s.title.clone()),
+                                    .child(display_title),
                             )
                             // 删除走原生右键菜单，不是行尾那个 hover 才出现的 ✕。
                             //
@@ -297,7 +372,17 @@ pub fn render_sidebar<T: 'static>(
                             // 先发现它存在。右键菜单是桌面应用里「对这一项做点什么」
                             // 的既定手势，不用教。
                             .context_menu(move |menu: PopupMenu, _window, _cx| {
+                                // 重命名排在删除前面：它是更常用的动作，
+                                // 而且删除放在最后能减少误点（菜单弹出时
+                                // 指针在顶部）
                                 menu.menu(
+                                    "重命名",
+                                    Box::new(RenameSession {
+                                        session_id: sid_ren.clone(),
+                                    }),
+                                )
+                                .separator()
+                                .menu(
                                     "删除会话",
                                     Box::new(DeleteSession {
                                         session_id: sid_del.clone(),
@@ -335,6 +420,7 @@ pub fn render_sidebar<T: 'static>(
         .child(
             div()
                 .id("new-chat")
+                .w_full()
                 .flex()
                 .h(px(ROW_HEIGHT))
                 .items_center()
@@ -352,6 +438,51 @@ pub fn render_sidebar<T: 'static>(
                 .child(Icon::new(IconName::Plus).size(px(13.)))
                 .child(div().flex_1().child("新对话")),
         )
+        // 「工具」「技能」两行：能力管理的直达入口。
+        //
+        // 为什么放在这儿而不是只留在设置里：这两样决定 agent **能做什么**，
+        // 属于用户在干活过程中会想调的东西（「这个技能怎么没生效」），
+        // 而设置里那一堆是配一次就不动的（API key、模型、上下文长度）。
+        // 频次不同就不该在同一个入口后面。
+        //
+        // 跟「新对话」同一套外观（无底、hover 出背景），但字色降一级 ——
+        // 新对话是这一栏的主操作，这两行是次要的。
+        .child(render_manage_row(
+            "open-agents",
+            IconName::Bot,
+            "Agent",
+            crate::pane::Pane::Agents,
+            props.pane,
+            on_open_page.clone(),
+            cx,
+        ))
+        .child(render_manage_row(
+            "open-automations",
+            IconName::Calendar,
+            "自动化",
+            crate::pane::Pane::Automations,
+            props.pane,
+            on_open_page.clone(),
+            cx,
+        ))
+        .child(render_manage_row(
+            "open-tools",
+            IconName::SquareTerminal,
+            "工具",
+            crate::pane::Pane::Tools,
+            props.pane,
+            on_open_page.clone(),
+            cx,
+        ))
+        .child(render_manage_row(
+            "open-skills",
+            IconName::BookOpen,
+            "技能",
+            crate::pane::Pane::Skills,
+            props.pane,
+            on_open_page.clone(),
+            cx,
+        ))
         // 「项目」区标签 + 添加入口。标签是分区名而不是可点的项，所以不做 hover 态。
         .child(
             div()
@@ -393,6 +524,7 @@ pub fn render_sidebar<T: 'static>(
         // 这是桌面应用侧边栏的常规位置（Finder、VS Code、waku 都这样）。
         .child(
             div()
+                .w_full()
                 .flex()
                 .h(px(ROW_HEIGHT))
                 .flex_none()
@@ -416,6 +548,52 @@ pub fn render_sidebar<T: 'static>(
         .into_any_element()
 }
 
+/// 「工具」「技能」这类直达设置某一页的行。
+///
+/// 单独一个函数是因为这两行只差图标、文字和目标页 —— 内联两遍会有
+/// 三十行几乎相同的样式链，其中一条改了另一条忘改就会视觉不一致。
+fn render_manage_row<T: 'static>(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    target: crate::pane::Pane,
+    current: crate::pane::Pane,
+    on_open_page: std::rc::Rc<PaneAction<T>>,
+    cx: &mut Context<T>,
+) -> impl IntoElement {
+    let active = current == target;
+    div()
+        .id(id)
+        .w_full()
+        .flex()
+        .h(px(ROW_HEIGHT))
+        .flex_none()
+        .items_center()
+        .gap(px(6.))
+        .px_2()
+        .rounded(Radius::control())
+        .cursor_pointer()
+        .text_size(FontSize::sm())
+        // 当前页给底 + 提亮。这四行是**目的地**，跟设置分区导航同一个道理：
+        // 「我在哪一页」只有这里能说（内容区里没有面包屑）。
+        .when(active, |d| {
+            d.bg(Tokens::hover_2())
+                .text_color(Tokens::ink())
+                .font_weight(FontWeight::MEDIUM)
+        })
+        // ink_3 而不是 ink_2：比「新对话」低一级，见调用点的注释
+        .when(!active, |d| {
+            d.text_color(Tokens::ink_3())
+                .hover(|s| s.bg(Tokens::hover()).text_color(Tokens::ink()))
+        })
+        .on_mouse_down(
+            MouseButton::Left,
+            cx.listener(move |this, _, window, cx| on_open_page(this, target, window, cx)),
+        )
+        .child(Icon::new(icon).size(px(13.)))
+        .child(div().flex_1().child(label))
+}
+
 /// 设置模式下的侧边栏：顶部返回 + 分区列表。
 fn render_settings_nav<T: 'static>(
     current: crate::settings::SettingsSection,
@@ -426,13 +604,14 @@ fn render_settings_nav<T: 'static>(
     use crate::settings::SettingsSection;
     let on_select = std::rc::Rc::new(on_select);
 
-    let mut list = div().flex().flex_col().gap(px(1.)).flex_1();
+    let mut list = div().w_full().flex().flex_col().gap(px(1.)).flex_1();
     for section in SettingsSection::ALL {
         let active = section == current;
         let on_select = on_select.clone();
         list = list.child(
             div()
                 .id(SharedString::from(format!("settings-{}", section.label())))
+                .w_full()
                 .flex()
                 .h(px(ROW_HEIGHT))
                 .items_center()
@@ -441,8 +620,18 @@ fn render_settings_nav<T: 'static>(
                 .rounded(Radius::control())
                 .cursor_pointer()
                 .text_size(FontSize::sm())
+                // 当前分区：明显的底 + 加粗。
+                //
+                // 原来用 surface（0x232427），压在 canvas（0x1c1d1f）上只差
+                // 一点点，扫一眼看不出自己在哪一页。hover_2 差得开。
+                //
+                // 这里跟会话行的规则不同（那边 active 不给底、只有 hover）——
+                // 会话行的选中已经由右侧内容表达了，而分区导航的「我在哪一页」
+                // 只有这一个地方能说。
                 .when(active, |d| {
-                    d.bg(Tokens::surface()).text_color(Tokens::ink())
+                    d.bg(Tokens::hover_2())
+                        .text_color(Tokens::ink())
+                        .font_weight(FontWeight::MEDIUM)
                 })
                 .when(!active, |d| {
                     d.text_color(Tokens::ink_2())
@@ -474,6 +663,7 @@ fn render_settings_nav<T: 'static>(
         .child(
             div()
                 .id("close-settings")
+                .w_full()
                 .flex()
                 .h(px(ROW_HEIGHT))
                 .items_center()

@@ -43,12 +43,7 @@ fn main() -> anyhow::Result<()> {
             TurnEvent::Notice(msg) => println!("\n💬 {}", msg),
         });
 
-        let req = TurnRequest {
-            question: question.to_string(),
-            history: vec![],
-            events,
-            cancel,
-        };
+        let req = TurnRequest::new(question, events, cancel);
 
         match provider.run_turn(req).await {
             Ok(answer) => {

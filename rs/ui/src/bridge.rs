@@ -97,10 +97,13 @@ fn to_ui_event(ev: TurnEvent) -> AgentEvent {
 /// 在专用运行时上跑一轮，全程只往 tx 里发事件。
 ///
 /// **这个函数里不能出现任何 gpui 类型**，见文件头。
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_agent_turn(
     provider: Arc<dyn Provider>,
+    session_id: String,
     question: String,
     history: Vec<smallest_agent_core::types::Message>,
+    on_complete: Arc<dyn smallest_agent_core::agent::OnComplete>,
     cancel: CancelToken,
     tx: EventTx,
 ) {
@@ -114,12 +117,13 @@ pub fn spawn_agent_turn(
             })
         };
 
-        let req = TurnRequest {
-            question,
-            history,
-            events: sink,
-            cancel,
-        };
+        let req = TurnRequest::new(question, sink, cancel)
+            // 会话 id 和存盘钩子都在请求上：provider 实例跨会话复用
+            // （外部 CLI 的子进程起一次要几秒），绑在实例上就会串台。
+            // 见 core 里 TurnRequest 的注释。
+            .with_session(session_id)
+            .with_history(history)
+            .with_on_complete(on_complete);
 
         let event = match provider.run_turn(req).await {
             Ok(text) => AgentEvent::Done(text),

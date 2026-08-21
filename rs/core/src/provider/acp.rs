@@ -37,11 +37,13 @@ use anyhow::{Context as _, Result, anyhow};
 use async_trait::async_trait;
 use tokio::sync::{Mutex, mpsc, oneshot};
 
+use crate::agent::OnComplete;
 use crate::approval::{
     ApprovalOption, ApprovalOutcome, ApprovalRequest, Approver, DenyAll, new_approval_id,
 };
-use crate::cancel::{CancelToken, Cancelled};
+use crate::cancel::{CancelToken, Cancelled, is_cancelled};
 use crate::provider::{EventSink, Provider, TurnEvent, TurnRequest};
+use crate::types::Message;
 
 /// 一个 ACP agent 的启动配置。
 #[derive(Debug, Clone)]
@@ -87,7 +89,14 @@ impl AcpSpec {
 enum SessionCommand {
     /// 发一轮 prompt。事件流经 sink，最终答案回 reply。
     Prompt {
+        /// **我们自己的**会话 id。连接任务用它在这条连接上找到（或新建）
+        /// 对应的 ACP 会话 —— 见 TurnRequest::session_id 的注释。
+        session_key: String,
         text: String,
+        /// 已有的对话。只在这条连接上**第一次**为这个会话说话时用得上
+        /// （新建的 ACP 会话是空白的，得把上文补给它）。
+        history: Vec<Message>,
+        on_complete: Option<Arc<dyn OnComplete>>,
         events: EventSink,
         approver: Arc<dyn Approver>,
         cancel: CancelToken,
@@ -160,10 +169,14 @@ impl Provider for AcpProvider {
     async fn run_turn(&self, req: TurnRequest) -> Result<String> {
         let TurnRequest {
             question,
-            // history 用不上：ACP 那侧的 CLI 自己维护会话上下文，
-            // 这正是「一次连接、多轮对话」的意义。我们再发一遍历史等于
-            // 让它把同样的话看两遍。
-            history: _,
+            session_id,
+            // history 在**稳态**下用不上：ACP 那侧的 CLI 自己维护上下文，
+            // 这正是「一次连接、多轮对话」的意义，再发一遍等于让它把同样的话
+            // 看两遍。但**新建 ACP 会话时**必须给 —— 那时候它是空白的，
+            // 而我们的会话可能已经有几十条消息了（重启后、或者换了模型
+            // 导致缓存里换了实例）。连接任务只在第一次为某个会话说话时用它。
+            history,
+            on_complete,
             events,
             cancel,
         } = req;
@@ -172,7 +185,10 @@ impl Provider for AcpProvider {
         let (reply_tx, reply_rx) = oneshot::channel();
 
         tx.send(SessionCommand::Prompt {
+            session_key: session_id,
             text: question,
+            history,
+            on_complete,
             events,
             approver: self.approver.clone(),
             cancel: cancel.clone(),
@@ -198,7 +214,7 @@ async fn spawn_session(spec: AcpSpec) -> Result<mpsc::UnboundedSender<SessionCom
     use agent_client_protocol::schema::v1::{
         ContentBlock, InitializeRequest, NewSessionRequest, PromptRequest,
         RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-        SelectedPermissionOutcome, SessionNotification, TextContent,
+        SelectedPermissionOutcome, SessionId, SessionNotification, TextContent,
     };
     use agent_client_protocol::{AcpAgent, AcpAgentConfig, Agent, ConnectionTo};
 
@@ -286,17 +302,27 @@ async fn spawn_session(spec: AcpSpec) -> Result<mpsc::UnboundedSender<SessionCom
                     .block_task()
                     .await?;
 
-                // 建会话。cwd 决定 CLI 在哪个项目里干活。
-                let session = connection
-                    .send_request(NewSessionRequest::new(spec.cwd.clone()))
-                    .block_task()
-                    .await?;
-                let session_id = session.session_id;
-
-                // 到这里才算连上，通知调用方
+                // 握手完就算连上，通知调用方。
+                //
+                // 以前这里还要先建一个 ACP 会话才报就绪。现在会话是**按需建**的
+                // （下面命令循环里），因为一条连接要服务多个会话 —— 提前建一个
+                // 等于替第一个会话预定了它，而第一个会话可能根本不来。
+                //
+                // 代价：建会话失败（认证过期之类）不再在这里暴露，而是变成
+                // 第一次提问的错误。可接受 —— 它本来就是「这轮跑不起来」，
+                // 而不是「连不上」。
                 if let Some(tx) = ready_inner.lock().expect("ready 锁").take() {
                     let _ = tx.send(Ok(()));
                 }
+
+                // 我们的会话 id → ACP 会话 id。
+                //
+                // **这个 map 是「对话独立」的落点。** 子进程共用（起一个要几秒，
+                // 每个会话起一个不现实），ACP 会话一人一个 —— 协议本来就支持
+                // 一条连接上开多个 session。少了它，两个都走 claude code 的会话
+                // 会发到同一个 ACP session 上，B 的回答里带着 A 的上下文。
+                let mut acp_sessions: std::collections::BTreeMap<String, SessionId> =
+                    std::collections::BTreeMap::new();
 
                 // ===== 命令循环 =====
                 // 闭包在这里不返回，所以连接一直活着 —— 这就是把作用域式 API
@@ -304,12 +330,52 @@ async fn spawn_session(spec: AcpSpec) -> Result<mpsc::UnboundedSender<SessionCom
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         SessionCommand::Prompt {
+                            session_key,
                             text,
+                            history,
+                            on_complete,
                             events,
                             approver,
                             cancel,
                             reply,
                         } => {
+                            // 这条连接上还没为这个会话开过 ACP 会话就现在开。
+                            // cwd 决定 CLI 在哪个项目里干活。
+                            let (acp_id, is_new) = match acp_sessions.get(&session_key) {
+                                Some(id) => (id.clone(), false),
+                                None => {
+                                    match connection
+                                        .send_request(NewSessionRequest::new(spec.cwd.clone()))
+                                        .block_task()
+                                        .await
+                                    {
+                                        Ok(s) => {
+                                            let id = s.session_id.clone();
+                                            acp_sessions.insert(session_key.clone(), id.clone());
+                                            (id, true)
+                                        }
+                                        Err(e) => {
+                                            // 建会话失败不能让整个连接任务退出 ——
+                                            // 别的会话还在用这条连接。只让这一轮失败。
+                                            let _ =
+                                                reply.send(Err(anyhow!("ACP 建会话失败：{e}")));
+                                            continue;
+                                        }
+                                    }
+                                }
+                            };
+
+                            // 新开的 ACP 会话是空白的，而我们这边可能已经有几十条
+                            // 消息了（重启后重连、或者换模型换掉了缓存里的实例）。
+                            // 把上文作为前言补给它 —— 不补的话用户会看见 CLI
+                            // 突然不记得刚才说过的话。
+                            let prompt_text = match is_new
+                                .then(|| history_preamble(&history))
+                                .flatten()
+                            {
+                                Some(preamble) => format!("{preamble}\n\n{text}"),
+                                None => text.clone(),
+                            };
                             // 装上本轮的事件去处，通知回调和权限回调都从这里读
                             *slot.lock().expect("事件槽锁") = Some(TurnSlot {
                                 events: events.clone(),
@@ -319,26 +385,13 @@ async fn spawn_session(spec: AcpSpec) -> Result<mpsc::UnboundedSender<SessionCom
 
                             let send = connection
                                 .send_request(PromptRequest::new(
-                                    session_id.clone(),
-                                    vec![ContentBlock::Text(TextContent::new(text))],
+                                    acp_id.clone(),
+                                    vec![ContentBlock::Text(TextContent::new(prompt_text))],
                                 ))
                                 .block_task();
 
-                            let outcome = tokio::select! {
-                                r = send => match r {
-                                    Ok(_) => {
-                                        // 最终答案是流式片段拼起来的 ——
-                                        // PromptResponse 只带 stop_reason，不带文本
-                                        let text = slot
-                                            .lock()
-                                            .expect("事件槽锁")
-                                            .as_ref()
-                                            .map(|s| s.text.lock().expect("文本锁").clone())
-                                            .unwrap_or_default();
-                                        Ok(text)
-                                    }
-                                    Err(e) => Err(anyhow!("ACP prompt 失败：{e}")),
-                                },
+                            let sent = tokio::select! {
+                                r = send => r.map_err(|e| anyhow!("ACP prompt 失败：{e}")),
                                 () = cancel.cancelled() => {
                                     // TODO: 该发 session/cancel 通知让 CLI 停下来。
                                     // 现在只是不等它了 —— CLI 会继续跑完这一轮，
@@ -348,7 +401,55 @@ async fn spawn_session(spec: AcpSpec) -> Result<mpsc::UnboundedSender<SessionCom
                                 }
                             };
 
+                            // 攒到的文本要在清空槽位**之前**读出来。
+                            //
+                            // 成功和取消都要读：取消时 CLI 已经吐了一半，那半段
+                            // 在界面上是看得见的，不存盘的话刷新一下就没了。
+                            // 最终答案本来就是流式片段拼的 —— PromptResponse
+                            // 只带 stop_reason，不带文本。
+                            let answer = slot
+                                .lock()
+                                .expect("事件槽锁")
+                                .as_ref()
+                                .map(|s| s.text.lock().expect("文本锁").clone())
+                                .unwrap_or_default();
                             *slot.lock().expect("事件槽锁") = None;
+
+                            let outcome = sent.map(|_| answer.clone());
+
+                            // 存盘。
+                            //
+                            // ## 为什么外部 CLI 的对话也要我们存
+                            //
+                            // CLI 那侧自己有上下文，所以「为了让它记住」不需要存。
+                            // 但我们的**界面**要在重启后还能显示这段对话，侧边栏
+                            // 也要有这个会话 —— 不存的话它下次启动就整个消失了，
+                            // 而用户眼里它跟内置 agent 的会话长得一模一样。
+                            //
+                            // 硬错误（连不上、协议错）不存：那一轮什么都没发生，
+                            // 存一条孤立的用户消息只会让历史里多一句没人回的话。
+                            let worth_saving = outcome.is_ok()
+                                || outcome.as_ref().err().is_some_and(is_cancelled);
+                            if worth_saving
+                                && let Some(oc) = &on_complete
+                            {
+                                let mut messages = history;
+                                messages.push(Message::User {
+                                    content: text.clone(),
+                                });
+                                if !answer.is_empty() {
+                                    messages.push(Message::Assistant {
+                                        content: answer,
+                                        tool_calls: Vec::new(),
+                                    });
+                                }
+                                if let Err(e) = oc.on_complete(&messages).await {
+                                    // 存盘失败不该影响这一轮的结果 —— 用户已经
+                                    // 看到回答了，把它变成报错更糟
+                                    eprintln!("[acp] 存会话失败：{e:#}");
+                                }
+                            }
+
                             let _ = reply.send(outcome);
                         }
                     }
@@ -372,6 +473,42 @@ async fn spawn_session(spec: AcpSpec) -> Result<mpsc::UnboundedSender<SessionCom
         .context("等 ACP 连接就绪失败")?
         .with_context(|| format!("连接 {display_name} 失败"))?;
     Ok(cmd_tx)
+}
+
+/// 把已有对话压成一段前言，补给新开的 ACP 会话。
+///
+/// ## 为什么是「前言」而不是真的重放历史
+///
+/// ACP 的 session/prompt 只收一条用户消息，没有「把这些消息灌进会话」的操作
+/// （协议里也没有 session/load 之外的注入方式）。所以补上文的唯一办法是把它
+/// 写进第一条 prompt 的文本里。
+///
+/// 这是个**近似**：CLI 看到的是「用户贴了一段对话记录然后提问」，而不是
+/// 「我们之前聊过这些」。角色边界会糊一点，但比让它完全不知道上文好得多。
+/// 空历史返回 None —— 那时候一个字都不该多加。
+///
+/// 工具消息不带进来：它们的内容是给模型看的中间结果（JSON），塞进前言里
+/// 又长又没用，而且外部 CLI 有它自己的工具，看到别人的工具输出只会分心。
+fn history_preamble(history: &[Message]) -> Option<String> {
+    let lines: Vec<String> = history
+        .iter()
+        .filter_map(|m| match m {
+            Message::User { content } if !content.trim().is_empty() => {
+                Some(format!("用户：{content}"))
+            }
+            Message::Assistant { content, .. } if !content.trim().is_empty() => {
+                Some(format!("助手：{content}"))
+            }
+            _ => None,
+        })
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "（以下是这个会话之前的对话记录，供你了解上文，不需要回应它）\n{}\n（上文结束）",
+        lines.join("\n")
+    ))
 }
 
 /// 本轮的事件去处 + 累积的文本。
@@ -476,5 +613,64 @@ fn to_approval_request(
             .take(1200)
             .collect(),
         options,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn user(s: &str) -> Message {
+        Message::User { content: s.into() }
+    }
+
+    fn assistant(s: &str) -> Message {
+        Message::Assistant {
+            content: s.into(),
+            tool_calls: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn empty_history_adds_nothing() {
+        // 新会话第一轮：一个字都不该多加，否则模型会以为有上文
+        assert!(history_preamble(&[]).is_none());
+    }
+
+    #[test]
+    fn preamble_keeps_order_and_marks_roles() {
+        let p = history_preamble(&[user("你好"), assistant("在")]).expect("有历史就该有前言");
+        let hello = p.find("用户：你好").expect("用户那句在");
+        let hi = p.find("助手：在").expect("助手那句在");
+        assert!(hello < hi, "顺序要保持");
+    }
+
+    #[test]
+    fn preamble_skips_tool_and_system_messages() {
+        let p = history_preamble(&[
+            Message::System {
+                content: "系统提示".into(),
+            },
+            user("查一下"),
+            Message::Tool {
+                content: r#"{"temp":20}"#.into(),
+                tool_call_id: "1".into(),
+                name: "weather".into(),
+            },
+            assistant("20 度"),
+        ])
+        .expect("有历史");
+        // system 每轮由 config 重新注入，工具输出是给模型看的中间结果 ——
+        // 都不属于「之前聊了什么」
+        assert!(!p.contains("系统提示"));
+        assert!(!p.contains("temp"));
+        assert!(p.contains("查一下") && p.contains("20 度"));
+    }
+
+    #[test]
+    fn all_blank_history_is_treated_as_empty() {
+        // 空 assistant 消息是有的（带工具调用、没正文的那种）。
+        // 只有这些的话等于没上文。
+        assert!(history_preamble(&[assistant(""), user("   ")]).is_none());
     }
 }

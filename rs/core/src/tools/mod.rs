@@ -6,6 +6,10 @@
 // run_tool 就用同一套逻辑驱动。
 // ============================================================================
 
+pub mod files;
+pub mod shell;
+pub mod web;
+
 use serde_json::json;
 
 use crate::types::{Args, ToolRegistry};

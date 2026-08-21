@@ -119,6 +119,8 @@ pub struct HttpCallModel {
     api_key: String,
     model: String,
     temperature: f64,
+    /// 这家厂商自带的联网搜索怎么开。跟着 Config 走，见 types.rs。
+    native_search: crate::vendors::SearchSupport,
     registry: ToolRegistry,
     on_text: Option<OnText>,
     /// 取消令牌。默认是个永不取消的空令牌，所以不关心取消的调用方
@@ -134,6 +136,7 @@ impl HttpCallModel {
             api_key: config.api_key.clone(),
             model: config.model.clone(),
             temperature: config.temperature,
+            native_search: config.native_search.clone(),
             registry,
             on_text: None,
             cancel: CancelToken::new(),
@@ -158,6 +161,7 @@ impl HttpCallModel {
             api_key: self.api_key.clone(),
             model: self.model.clone(),
             temperature: self.temperature,
+            native_search: self.native_search.clone(),
             registry: self.registry.clone(),
             on_text: self.on_text.clone(),
             cancel,
@@ -172,6 +176,7 @@ impl HttpCallModel {
             api_key: self.api_key.clone(),
             model: model.to_string(),
             temperature: self.temperature,
+            native_search: self.native_search.clone(),
             registry: self.registry.clone(),
             on_text: self.on_text.clone(),
             cancel: self.cancel.clone(),
@@ -191,6 +196,7 @@ impl CallModel for HttpCallModel {
             messages,
             &self.registry,
             streaming,
+            &self.native_search,
         );
 
         let client = self.client.clone();

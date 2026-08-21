@@ -10,7 +10,7 @@
 // load_config() 读真实环境，load_config_from() 接受任意取值闭包。
 // ============================================================================
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 
 use crate::types::Config;
 
@@ -20,8 +20,29 @@ use crate::types::Config;
 ///   1. 有外部数据需求时调工具，不要凭空编造（防幻觉）
 ///   2. 用到 RAG 检索结果时注明来源文件名（Stage 3 加的溯源要求）
 pub const SYSTEM_PROMPT: &str = concat!(
-    "你是一个简洁、诚实的中文助手。当需要外部信息（如天气、笔记）时调用提供的工具，不要凭空编造；信息足够时直接回答。",
-    "当回答用到 search_notes 或读取文件得到的内容时，在末尾注明来源文件名（如：来源：01-rag.md）。"
+    "你是一个简洁、诚实的中文助手，同时是一个能动手的 agent。\n",
+    // 不写「你可以调用工具」这种空话：工具清单和参数已经在请求里了，
+    // 模型看得见。这里要说的是**它自己判断不出来的那些**：
+    // 哪些操作有副作用、结果从哪来、什么时候该停下来问。
+    "\n",
+    "你有这些能力，需要时直接用，不要凭空编造，也不要反过来问用户「要不要我去查」。\n",
+    // 工具清单是动态的：没有工作目录的会话不会有文件和命令工具。
+    // 所以这里说「如果你有」，而不是断言它们一定在
+    "如果下面这些工具在你的清单里：\n",
+    "  • 文件：list_directory / read_file / write_file / edit_file / search_files。\n",
+    "    它们只能在**工作目录**里活动，越界会报错并告诉你根目录在哪。\n",
+    "  • 命令：run_command，在工作目录里执行 shell 命令。\n",
+    "  • 网络：fetch_url 抓取网页正文；搜索用你手上的搜索工具（可能是\n",
+    "    厂商自带的，也可能是 web_search）。\n",
+    "\n",
+    // 这三条是模型最容易犯的错，逐条对应真实的失败方式
+    "几条要求：\n",
+    "  1. 改文件前先 read_file 看一眼当前内容，不要凭记忆改。\n",
+    "  2. write_file 会**覆盖整个文件**；只改一小段时用 edit_file。\n",
+    "  3. 写文件和执行命令需要用户确认，被拒绝时不要换个说法重试同一个操作，\n",
+    "     先说明你为什么需要它。\n",
+    "\n",
+    "回答用到读文件或网页得到的内容时，注明来源（文件名或网址）。"
 );
 
 /// 从真实进程环境读配置。
@@ -31,18 +52,65 @@ pub fn load_config() -> Result<Config> {
 
 /// 从任意「取值函数」读配置。测试传一个查 HashMap 的闭包即可。
 pub fn load_config_from(get: &dyn Fn(&str) -> Option<String>) -> Result<Config> {
-    // 只有 API key 是强制必填，其余都有合理默认值。
-    let api_key = get("DEEPSEEK_API_KEY")
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| anyhow!("Missing DEEPSEEK_API_KEY（把 .env.example 复制成 .env 并填好）"))?;
+    // ## 找一个配好的厂商
+    //
+    // 原来这里写死了 `DEEPSEEK_API_KEY`：没填就直接 bail。加了多厂商之后
+    // 那是个真 bug —— 只填了 Anthropic key 的用户**连 app 都起不来**，
+    // 而报错让他去填一个他根本不用的厂商的 key。
+    //
+    // 现在按 vendors 的顺序找第一个**配好的**：内置九家看有没有 key，
+    // 自定义端点看有没有地址 + 模型清单（见 vendors::is_configured）。
+    // DeepSeek 排在第一，所以老配置的行为一个字都没变。
+    //
+    // 桌面版里这份 Config 只是**基线** —— 真正用哪家由会话绑定决定，
+    // 每轮在 Registry 里用 Selection::apply 覆盖掉这三个字段。
+    // 基线仍然要有个合理值，因为 CLI 直接用它。
+    let Some(vendor_id) = crate::vendors::first_configured(get) else {
+        bail!(
+            "还没配任何模型。在设置 → 模型里填一把 API Key（{}），\
+             或者用自定义端点指向第三方 / 本地服务（{} + {}）",
+            crate::vendors::key_envs().join(" / "),
+            crate::vendors::CUSTOM_BASE_URL,
+            crate::vendors::CUSTOM_MODELS,
+        );
+    };
 
-    let model = get("DEEPSEEK_MODEL");
+    // first_configured 刚刚认过这个 id，所以一定解析得出来。
+    // expect 而不是静默兜底：走到这儿说明那两个函数对「认识哪些 id」
+    // 的看法不一致，那是 bug 而不是用户配错了。
+    let vendor = crate::vendors::entry(&vendor_id, get)
+        .expect("first_configured 返回的厂商必须解析得出来");
+
+    let api_key = crate::vendors::api_key_setting(&vendor_id)
+        .and_then(get)
+        // trim：粘 key 时很容易带上前后空格，不去掉就是一个 401
+        .map(|k| k.trim().to_string())
+        .unwrap_or_default();
+    // 端点不再有覆盖键 —— 内置厂商的是常量，自定义端点的由用户填。
+    // 见 vendors.rs 文件头那段「为什么内置厂商没有 API 端点这一栏」。
+    let base_url = vendor.base_url.clone();
+    // 这家的默认模型。自定义端点的话是用户填的清单里第一个 ——
+    // is_configured 保证了清单非空，所以这里不会是空串。
+    let default_model = vendor
+        .models
+        .first()
+        .map(|m| m.id.clone())
+        .unwrap_or_default();
+    // 模型：优先用户显式指定的，否则用这家的默认。
+    //
+    // MODEL 是新的通用键名，DEEPSEEK_MODEL 留着兼容老配置 ——
+    // 老用户升级之后不该发现自己配的模型没生效了。
+    let model = get("MODEL")
+        .or_else(|| get("DEEPSEEK_MODEL"))
+        .filter(|s| !s.trim().is_empty());
 
     Ok(Config {
         api_key,
-        base_url: get("DEEPSEEK_BASE_URL").unwrap_or_else(|| "https://api.deepseek.com/v1".into()),
-        model: model.clone().unwrap_or_else(|| "deepseek-chat".into()),
+        base_url,
+        model: model.clone().unwrap_or_else(|| default_model.clone()),
         // temperature=0 → 输出更确定/一致，适合工具调用场景；调高更「有创意」但不稳定
+        // 这家自带的搜索。vendors 那边已经解析好了，直接搬过来
+        native_search: vendor.search.clone(),
         temperature: num_from_env(get("TEMPERATURE"), 0.0, "TEMPERATURE")?,
         max_turns: num_from_env(get("MAX_TURNS"), 10.0, "MAX_TURNS")? as u32,
         system_prompt: SYSTEM_PROMPT.to_string(),
@@ -61,10 +129,13 @@ pub fn load_config_from(get: &dyn Fn(&str) -> Option<String>) -> Result<Config> 
             as u32,
         keep_recent: num_from_env(get("KEEP_RECENT"), 6.0, "KEEP_RECENT")? as usize,
 
-        // fallback_model 优先用独立变量，没设就跟主模型一样——退化成「不切换」
+        // fallback_model 优先用独立变量，没设就跟主模型一样——退化成「不切换」。
+        // 兜底也跟着厂商走，不再写死 deepseek-chat：
+        // 拿另一家的模型 id 去降级只会得到 model not found。
         fallback_model: get("FALLBACK_MODEL")
+            .filter(|s| !s.trim().is_empty())
             .or(model)
-            .unwrap_or_else(|| "deepseek-chat".into()),
+            .unwrap_or(default_model),
         max_retries: num_from_env(get("MAX_RETRIES"), 2.0, "MAX_RETRIES")? as u32,
 
         // LLM_CACHE=0 才关闭缓存；其他任何值（包括不设）都视为开启

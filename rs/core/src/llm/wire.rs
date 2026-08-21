@@ -94,14 +94,42 @@ pub fn build_request(
     messages: &[Message],
     registry: &ToolRegistry,
     stream: bool,
+    native_search: &crate::vendors::SearchSupport,
 ) -> Value {
+    use crate::vendors::SearchSupport;
+
     let mut body = json!({
         "model": model,
         "temperature": temperature,
         "messages": to_wire_messages(messages),
         "stream": stream,
     });
-    let tools = to_wire_tools(registry);
+    let mut tools = to_wire_tools(registry);
+
+    // 厂商自带的联网搜索。
+    //
+    // 这是「一把 key 就能用」的落点：用户配了模型的 key 之后搜索就能用了，
+    // 不用再去注册一家搜索服务。各家开关的形状不一样，见 vendors::NativeSearch。
+    match native_search {
+        SearchSupport::None => {}
+        // 阿里 DashScope：请求体里一个布尔
+        SearchSupport::EnableFlag => {
+            body["enable_search"] = Value::Bool(true);
+        }
+        // 智谱 / OpenRouter：tools 数组里加一项
+        SearchSupport::ToolType(t) => {
+            tools.push(json!({ "type": t }));
+        }
+        // 月之暗面那种。放在这里是为了形状完整 ——
+        // 目前没有厂商配它，见 NativeSearch::BuiltinFunction 的注释
+        SearchSupport::BuiltinFunction(name) => {
+            tools.push(json!({
+                "type": "builtin_function",
+                "function": { "name": name },
+            }));
+        }
+    }
+
     if !tools.is_empty() {
         body["tools"] = Value::Array(tools);
     }

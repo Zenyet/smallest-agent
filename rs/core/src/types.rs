@@ -189,6 +189,12 @@ pub struct Config {
     pub temperature: f64,
     pub max_turns: u32,
     pub system_prompt: String,
+    /// 这家厂商自带的联网搜索怎么开（空 = 没有，回落到我们自己的
+    /// web_search 工具）。由 vendors::Selection::apply 填。
+    ///
+    /// 放在 Config 里而不是另开一条通路：它和 api_key / base_url / model
+    /// 一样是「换厂商就要换」的东西，跟着同一个结构体走最不容易漏。
+    pub native_search: crate::vendors::SearchSupport,
 
     // Stage 3：RAG
     pub embedding_model: String,

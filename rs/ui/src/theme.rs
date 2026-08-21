@@ -10,9 +10,9 @@
 //      page 是窗口底色，canvas 是侧边栏，surface 是抬起的卡片，
 //      inset 是凹陷区（代码块），field 是输入控件。别拿 surface 当边框用。
 //
-//   2. 边界用 hairline 而不是 border。CSS 那边是 box-shadow 的第一层
-//      `0 0 0 1px var(--line)`；gpui 没有 ring，所以用 border_1 + border_color
-//      近似 —— 视觉上差别在于 border 占布局空间，需要时用负 margin 补。
+//   2. 边界一律用 `border_1() + border_color(...)`，**不要**用 box-shadow
+//      去模拟 CSS 的 ring（`0 0 0 1px`）。原来那套 hairline 试过，
+//      在滚动容器里会被裁掉左右两边 —— 详见下面「关于卡片边界」那段。
 //
 // 还有一条比配色更决定观感的：**13px 基准 + medium 字重 + 紧凑间距**。
 // styles.css 的注释专门强调了这点（「之前只换了颜色没换尺度，所以看着还是糙」），
@@ -59,6 +59,27 @@ impl Tokens {
     /// 输入控件、用户气泡
     pub fn field() -> Hsla {
         rgb(0x2b2c2f).into()
+    }
+
+    // --- 浮层 ---
+    //
+    // ## 为什么浮层不能用 surface
+    //
+    // 原来 popover / 下拉 / 右键菜单都用 surface（0x232427）。它只比 page
+    // （0x17181a）亮一点点，而**浮层是这套色阶里离观察者最近的一层** ——
+    // 它悬在所有内容之上，色阶上必须明显更亮，否则看着像沉进背景里
+    // 而不是浮在上面。表现出来就是「弹出来那块太黑了」。
+    //
+    // 抬到 0x2f3034：比 surface 亮一档、比 field（0x2b2c2f）也亮，
+    // 因为浮层里可能**装着**输入控件，装它的容器不该比里面的东西暗。
+    /// 浮层容器（popover、下拉菜单、右键菜单）
+    pub fn overlay() -> Hsla {
+        rgb(0x2f3034).into()
+    }
+    /// 浮层里的 hover。比 overlay 再亮一档 ——
+    /// 页面上那个 hover（0x2a2b2e）在浮层里比底色还暗，会反过来看着像凹陷
+    pub fn overlay_hover() -> Hsla {
+        rgb(0x3b3c41).into()
     }
 
     // --- 文字：三级，别再加第四级 ---
@@ -168,50 +189,35 @@ impl FontSize {
     }
 }
 
-/// 卡片阴影：hairline ring + 两层柔和投影。
-///
-/// 这是那套设计的视觉签名 —— styles.css 里写了「边界用 hairline ring 而不是
-/// border，shadow-card 的第一层是 0 0 0 1px var(--line)，叠上柔和投影」。
-///
-/// gpui 没有 CSS 的 ring，所以第一层用一个 spread 为 1px、blur 为 0 的阴影模拟，
-/// 效果和 `box-shadow: 0 0 0 1px` 一致，而且不像 border 那样占布局空间
-/// （border 会让内容区少 2px，一堆嵌套卡片叠起来偏移就看得出来）。
-pub fn shadow_card() -> Vec<gpui::BoxShadow> {
-    vec![
-        gpui::BoxShadow {
-            color: Tokens::line(),
-            offset: gpui::point(px(0.), px(0.)),
-            blur_radius: px(0.),
-            spread_radius: px(1.),
-            inset: false,
-        },
-        gpui::BoxShadow {
-            color: rgba(0x00000033).into(),
-            offset: gpui::point(px(0.), px(1.)),
-            blur_radius: px(2.),
-            spread_radius: px(0.),
-            inset: false,
-        },
-        gpui::BoxShadow {
-            color: rgba(0x00000033).into(),
-            offset: gpui::point(px(0.), px(2.)),
-            blur_radius: px(6.),
-            spread_radius: px(0.),
-            inset: false,
-        },
-    ]
-}
-
-/// 只有 hairline，没有投影。用在不需要「抬起」感的地方（用户气泡、badge）。
-pub fn shadow_hairline() -> Vec<gpui::BoxShadow> {
-    vec![gpui::BoxShadow {
-        color: Tokens::line(),
-        offset: gpui::point(px(0.), px(0.)),
-        blur_radius: px(0.),
-        spread_radius: px(1.),
-        inset: false,
-    }]
-}
+// ============================================================================
+// 关于卡片边界：为什么这里没有 shadow_card / shadow_hairline 了
+// ----------------------------------------------------------------------------
+// 原来有两个辅助函数，用 box-shadow 画卡片的边界 —— 第一层是
+// `spread_radius: 1px, blur: 0` 的阴影，模拟 CSS 的 `0 0 0 1px`（ring），
+// 后面叠两层柔和投影。理由写得很充分：ring 不占布局空间，而 border 会让
+// 内容区少 2px，嵌套卡片叠起来偏移就看得出来。
+//
+// 两个实测问题把它否掉了：
+//
+//   1. **被裁掉**。gpui 给 `overflow_*_scroll` 的容器加了 ContentMask，
+//      裁剪范围**就是容器自己的 bounds**（见 gpui 的 Style::overflow_mask）。
+//      而 spread 出去的那 1px 在子元素 bounds **之外** —— 子元素撑满宽度时
+//      （`w_full` 或 flex 拉伸），左右两边的 ring 正好落在裁剪线外面，
+//      于是卡片看起来「左右边被裁了」，上下反而还在。
+//      这四个独立页面和设置页的内容区全是滚动容器，所以每张卡都中招。
+//
+//   2. **慢**。三层阴影（两层带 blur）每帧对每张卡重画一遍。
+//      Electron 版那边气泡就是纯色 + 1px 边框。
+//
+// 现在统一用 `border_1() + border_color(...)`：占布局空间，但在裁剪范围内，
+// 而且便宜。配色规则是底色深浅决定的 ——
+//   • `surface()`（抬起的卡片）配 `line_strong()`
+//   • `inset()`（凹陷块）配 `line()`
+// 和 chat.rs 里消息气泡用的是同一套。
+//
+// 「border 占 2px 导致嵌套偏移」那个顾虑没有落地成实际问题：卡片是
+// flex 布局撑开的，2px 由容器吸收，不会层层累加。
+// ============================================================================
 
 /// 把 Rgba 转 Hsla 的辅助（gpui 的 rgb()/rgba() 返回 Rgba，多数样式方法要 Hsla）。
 #[allow(dead_code)]
@@ -291,8 +297,18 @@ pub fn apply_theme(cx: &mut gpui::App) {
     theme.mono_font_family = FONT_MONO.into();
     theme.font_size = FontSize::base();
 
-    // 圆角：组件默认的比我们这套小
-    theme.radius = Radius::control();
+    // ## 圆角：为什么 radius 要设成 12 而不是我们的 control（8）
+    //
+    // 浮层容器（右键菜单、下拉菜单）的圆角是 `tokens.radius.md`，而它由
+    // `radius_tokens()` 从 `theme.radius` 直接推出来（mod.rs:288 `md: self.radius`）。
+    // 菜单**项**的圆角则是 `theme.radius.min(px(8.))`（popup_menu.rs:1424）。
+    //
+    // 所以 radius 设 8 的话，容器和项都是 8 —— **内外一样大**，
+    // 内容顶着容器边缘，看着就是「圆角太小」。
+    //
+    // 设 12 之后：容器 12、项被 min 夹到 8，差一档，内容嵌在容器里。
+    // 这也是为什么之前我说「改不动」是错的 —— 上限只管内层，容器没有上限。
+    theme.radius = px(12.);
     theme.radius_lg = Radius::card();
 
     let c = &mut theme.colors;
@@ -305,9 +321,25 @@ pub fn apply_theme(cx: &mut gpui::App) {
     c.input = Tokens::line_strong();
     c.ring = Tokens::accent();
 
-    // 次要表面：菜单、popover、卡片
-    c.popover = Tokens::surface();
+    // 次要表面：菜单、popover、卡片。
+    //
+    // popover 用 overlay 而不是 surface：浮层是离观察者最近的一层，
+    // 色阶上必须明显更亮，否则看着像沉进背景。见 Tokens::overlay 的注释。
+    // 这一个字段管住组件库里所有浮层（PopupMenu、Popover、下拉），
+    // 因为它们的底色都从 `tokens.colors.surface` 取，而那个是从这里推的
+    // （mod.rs 的 color_tokens：`surface: self.popover`）。
+    c.popover = Tokens::overlay();
     c.popover_foreground = Tokens::ink();
+    // 副作用，记一下：浮层的描边走的是**全局** border（下面那个 `c.border`），
+    // 组件库没有单独的 popover 边框色（popover_style 里就是
+    // `border_color(tokens.colors.border)`）。border 是 line（0x2e3033），
+    // 而 overlay 是 0x2f3034 —— 现在浮层的边框和它自己的底色几乎同色，
+    // 等于没有边框。
+    //
+    // 刻意不改：浮层靠「比下面所有东西都亮」+ shadow_lg 完成分离，
+    // 深色界面里这是常见做法。要给它一条可见的边就得把 border 整体提亮，
+    // 而那会动到页面上每一处描边（输入框、卡片、表格），
+    // 收益不清楚而波及面很大。
     c.secondary = Tokens::inset();
     c.secondary_foreground = Tokens::ink_2();
     c.secondary_hover = Tokens::hover();

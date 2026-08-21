@@ -12,6 +12,7 @@
 //   resilience.rs ← src/resilience.ts 重试 + 降级装饰器
 //   mcp.rs        ← src/mcp/client.ts MCP 客户端，动态发现工具
 //   mcp_config.rs ← （无对应）        MCP server 列表配置。TS 版写死在代码里
+//   mcp_import.rs ← （无对应）        从别家 CLI 导入 MCP 配置
 //   memory.rs     ← src/memory/*      会话落盘 + 上下文压缩
 //   runtime.rs    ← （无对应）        跨执行器的运行时接缝，Rust 特有
 //   cancel.rs     ← （无对应）        取消令牌。TS 版没有，所以那边不敢让用户停
@@ -23,19 +24,25 @@
 // ============================================================================
 
 pub mod agent;
+pub mod agents;
 pub mod approval;
+pub mod automations;
 pub mod cache;
 pub mod cancel;
 pub mod config;
 pub mod llm;
 pub mod mcp;
 pub mod mcp_config;
+pub mod mcp_import;
 pub mod memory;
 pub mod provider;
 pub mod resilience;
 pub mod runtime;
+pub mod skills;
 pub mod tools;
 pub mod types;
+pub mod vendors;
+pub mod workspace;
 
 // 常用类型提到 crate 根，调用方不用写三层路径。
 pub use agent::{AgentDeps, TurnInfo, run_agent};

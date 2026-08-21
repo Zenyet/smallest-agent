@@ -11,8 +11,14 @@
 mod assets;
 mod bridge;
 mod chat;
+mod history;
+mod msg_times;
+mod pages;
+mod pane;
+mod picker;
 mod projects;
-mod provider_config;
+mod providers;
+mod session_titles;
 mod settings;
 mod sidebar;
 mod theme;
@@ -33,9 +39,10 @@ fn main() {
         Ok(c) => c,
         Err(err) => {
             // 配置错误在开窗前就得报，否则用户看到一个空窗口不知道为什么
+            // 错误自己已经把可用的键名列全了（见 config.rs），
+            // 这里不再重复某一家的名字 —— 那会让想用别家的人以为
+            // 必须先注册 DeepSeek
             eprintln!("配置有问题：{err:#}");
-            eprintln!();
-            eprintln!("把 .env.example 复制成 .env 并填好 DEEPSEEK_API_KEY。");
             std::process::exit(2);
         }
     };
