@@ -14,10 +14,10 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_component::menu::{ContextMenuExt as _, PopupMenu};
 use gpui_component::{Icon, IconName};
 
 use crate::chat::{DeleteSession, RemoveProject, RenameSession};
+use crate::context_menu::MenuItem;
 use crate::projects::{SessionGroup, UNGROUPED_ID};
 use crate::theme::{FontSize, Radius, Tokens};
 
@@ -94,6 +94,9 @@ pub type PaneAction<T> = Box<dyn Fn(&mut T, crate::pane::Pane, &mut Window, &mut
 pub fn render_sidebar<T: 'static>(
     props: SidebarProps<'_>,
     cb: SidebarCallbacks<T>,
+    // 右键菜单要它 —— 菜单的开关状态挂在元素上（window.use_keyed_state），
+    // 而那个 API 只有 &mut Window 能调。见 context_menu.rs。
+    window: &mut Window,
     cx: &mut Context<T>,
 ) -> AnyElement {
     let SidebarCallbacks {
@@ -238,17 +241,23 @@ pub fn render_sidebar<T: 'static>(
 
         // 「移除项目」在右键菜单里。未分组那组不是用户建的，没有「移除」可做。
         //
-        // context_menu() 返回的是 ContextMenu<Div> 而不是 Div，所以不能赋回
-        // 同一个变量 —— 在这里收口成 AnyElement，两个分支类型才统一。
+        // 两个分支类型不同（挂了菜单的那个多一个 child），所以在这里
+        // 收口成 AnyElement。
         let row: AnyElement = if is_project {
-            row.context_menu(move |menu: PopupMenu, _window, _cx| {
-                menu.menu(
+            crate::context_menu::attach(
+                row,
+                // id 用项目 id 而不是循环下标：下标会在增删项目时把
+                // 上一帧的菜单状态串到别的行上（gpui 靠 id 找回状态）
+                SharedString::from(format!("group-menu-{}", group.id)),
+                vec![MenuItem::action(
                     "移除项目",
                     Box::new(RemoveProject {
                         project_id: gid_remove.clone(),
                     }),
-                )
-            })
+                )],
+                window,
+                cx,
+            )
             .into_any_element()
         } else {
             row.into_any_element()
@@ -317,79 +326,80 @@ pub fn render_sidebar<T: 'static>(
                         continue;
                     }
                     let sid = s.id.clone();
-                    let sid_del = s.id.clone();
-                    let sid_ren = s.id.clone();
                     let on_select = on_select.clone();
-                    ul = ul.child(
-                        div()
-                            .id(SharedString::from(format!("session-{}", s.id)))
-                            .w_full()
-                            .flex()
-                            .h(px(ROW_HEIGHT))
-                            .items_center()
-                            .gap(px(6.))
-                            // 右 padding 和项目行一致；左边额外加缩进表达层级。
-                            // 6 + 14 = 20，正好让标题从项目名的「文件夹图标」
-                            // 之后开始，视觉上挂在它下面。
-                            .pl(px(20.))
-                            .pr(px(6.))
-                            .rounded(Radius::control())
-                            .cursor_pointer()
-                            .text_size(FontSize::sm())
-                            // 选中态只靠**文字提亮**，不给背景色。
-                            //
-                            // 项目行才用背景块 —— 侧边栏里同时出现两种背景块
-                            // （选中的项目 + 选中的会话）会让人不确定哪个是
-                            // 「当前在看的」。会话是叶子节点，提亮就够。
-                            //
-                            // hover 仍然给背景：那是「指针在这」的即时反馈，
-                            // 和「这是当前选中的」是两件事，不冲突。
-                            .text_color(if is_active {
-                                Tokens::ink()
-                            } else {
-                                Tokens::ink_2()
-                            })
-                            .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
-                            .hover(|s| s.bg(Tokens::hover()))
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    on_select(this, sid.clone(), window, cx);
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .whitespace_nowrap()
-                                    .child(display_title),
-                            )
-                            // 删除走原生右键菜单，不是行尾那个 hover 才出现的 ✕。
-                            //
-                            // Electron 版换成右键菜单时记了理由：那个 ✕ 占着每行
-                            // 右端（哪怕透明也占位），而且悬停才出现意味着用户得
-                            // 先发现它存在。右键菜单是桌面应用里「对这一项做点什么」
-                            // 的既定手势，不用教。
-                            .context_menu(move |menu: PopupMenu, _window, _cx| {
-                                // 重命名排在删除前面：它是更常用的动作，
-                                // 而且删除放在最后能减少误点（菜单弹出时
-                                // 指针在顶部）
-                                menu.menu(
-                                    "重命名",
-                                    Box::new(RenameSession {
-                                        session_id: sid_ren.clone(),
-                                    }),
-                                )
-                                .separator()
-                                .menu(
-                                    "删除会话",
-                                    Box::new(DeleteSession {
-                                        session_id: sid_del.clone(),
-                                    }),
-                                )
+                    let row = div()
+                        .id(SharedString::from(format!("session-{}", s.id)))
+                        .w_full()
+                        .flex()
+                        .h(px(ROW_HEIGHT))
+                        .items_center()
+                        .gap(px(6.))
+                        // 右 padding 和项目行一致；左边额外加缩进表达层级。
+                        // 6 + 14 = 20，正好让标题从项目名的「文件夹图标」
+                        // 之后开始，视觉上挂在它下面。
+                        .pl(px(20.))
+                        .pr(px(6.))
+                        .rounded(Radius::control())
+                        .cursor_pointer()
+                        .text_size(FontSize::sm())
+                        // 选中态只靠**文字提亮**，不给背景色。
+                        //
+                        // 项目行才用背景块 —— 侧边栏里同时出现两种背景块
+                        // （选中的项目 + 选中的会话）会让人不确定哪个是
+                        // 「当前在看的」。会话是叶子节点，提亮就够。
+                        //
+                        // hover 仍然给背景：那是「指针在这」的即时反馈，
+                        // 和「这是当前选中的」是两件事，不冲突。
+                        .text_color(if is_active {
+                            Tokens::ink()
+                        } else {
+                            Tokens::ink_2()
+                        })
+                        .when(is_active, |d| d.font_weight(FontWeight::MEDIUM))
+                        .hover(|s| s.bg(Tokens::hover()))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(move |this, _, window, cx| {
+                                on_select(this, sid.clone(), window, cx);
                             }),
-                    );
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(display_title),
+                        );
+                    // 删除走右键菜单，不是行尾那个 hover 才出现的 ✕。
+                    //
+                    // Electron 版换成右键菜单时记了理由：那个 ✕ 占着每行
+                    // 右端（哪怕透明也占位），而且悬停才出现意味着用户得
+                    // 先发现它存在。右键菜单是桌面应用里「对这一项做点什么」
+                    // 的既定手势，不用教。
+                    ul = ul.child(crate::context_menu::attach(
+                        row,
+                        SharedString::from(format!("session-menu-{}", s.id)),
+                        // 重命名排在删除前面：它是更常用的动作，
+                        // 而且删除放在最后能减少误点（菜单弹出时指针在顶部）
+                        vec![
+                            MenuItem::action(
+                                "重命名",
+                                Box::new(RenameSession {
+                                    session_id: s.id.clone(),
+                                }),
+                            ),
+                            MenuItem::Separator,
+                            MenuItem::action(
+                                "删除会话",
+                                Box::new(DeleteSession {
+                                    session_id: s.id.clone(),
+                                }),
+                            ),
+                        ],
+                        window,
+                        cx,
+                    ));
                 }
                 block = block.child(ul);
             }

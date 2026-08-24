@@ -254,6 +254,26 @@ pub fn markdown_style() -> gpui_component::text::TextViewStyle {
         c.padding.right = Some(px(12.).into());
         // 长行横向滚动而不是硬折 —— 代码折行会破坏缩进结构
         c.overflow.x = Some(gpui::Overflow::Scroll);
+        // ## 必须跟着 overflow.x 一起设，否则滚动会串轴
+        //
+        // gpui 默认 `restrict_scroll_to_axis = false`（style.rs:781），这时
+        // 滚动增量会**跨轴重映射**：一个只声明了 x 轴滚动的容器，收到纵向
+        // 增量时会把 `delta.y` 当成 `delta_x` 用（div.rs:3218 那个分支的条件
+        // 就是 `!restrict_scroll_to_axis && overflow.y != Scroll`）。
+        //
+        // 表现出来就是：鼠标停在代码块上纵向滚，代码块自己横着跑 ——
+        // 而外层对话区同时也在纵向滚，两个一起动就是「抖动」。
+        //
+        // 设成 true 之后走的是另一条路：`ongoing_scroll.filter()`
+        // 把手势锁在它一开始的主轴上（触控板的 precise 增量才有这个锁），
+        // 并且**关掉跨轴重映射** —— 这正是 Style::restrict_scroll_to_axis
+        // 的文档说的「horizontal input will not scroll a container that only
+        // has vertical overflow enabled」。
+        //
+        // 注意这只治一半：横向滚动带出纵向是**外层**纵向容器在把 `delta.x`
+        // 当 `delta_y`（div.rs:3226 的对称分支），那边看的是它自己的 flag，
+        // 跟这里设什么无关。配套的另一半在 chat.rs 对话区那个滚动容器上。
+        c.restrict_scroll_to_axis = Some(true);
         c
     };
 
@@ -267,7 +287,7 @@ pub fn markdown_style() -> gpui_component::text::TextViewStyle {
 }
 
 // ============================================================================
-// 把 gpui-component 的 Theme 对齐到我们的 token
+// 把组件库的 Theme 对齐到我们的 token
 // ----------------------------------------------------------------------------
 // 这一步不做的后果是个真 bug：`gpui_component::init()` 里写死了
 // `Theme::change(ThemeMode::Light)`，所以组件库里所有东西（Input、Button、
@@ -276,8 +296,18 @@ pub fn markdown_style() -> gpui_component::text::TextViewStyle {
 // 表现出来就是输入框白底白字看不见 —— 我自己画的 div 用的是 Tokens，
 // 组件用的是它自己那套 Theme，两套颜色各走各的。
 //
-// 所以凡是用了 gpui-component 组件的项目，都必须显式对齐这两套，
-// 只设自己的 token 是不够的。
+// ## 实际是**三套**，不是两套
+//
+// 后来又踩到一次（右键菜单又黑又方），才发现颜色有三个来源：
+//
+//   1. 我们的 `Tokens`            —— 我手写的 div 用
+//   2. `gpui_component::Theme`    —— 组件用，字段是**实时**的
+//   3. `gpui_base::Theme.tokens`  —— 底层 crate 用（画浮层的 popover_style
+//                                    就在这儿），是 1→2 之后拍的**快照**
+//
+// 第 3 层最容易漏：它只在 `Theme::change()` 里算一次，所以「先 change、
+// 再改字段」这个顺序下，改完的字段它一个都看不见。对齐必须对到第 3 层，
+// 见 apply_theme 末尾。
 // ============================================================================
 
 /// 在 gpui_component::init(cx) **之后**调用。
@@ -297,18 +327,20 @@ pub fn apply_theme(cx: &mut gpui::App) {
     theme.mono_font_family = FONT_MONO.into();
     theme.font_size = FontSize::base();
 
-    // ## 圆角：为什么 radius 要设成 12 而不是我们的 control（8）
+    // ## 圆角：容器 card(10) / 项 control(8)，正好是 token 表里差一档的那对
     //
-    // 浮层容器（右键菜单、下拉菜单）的圆角是 `tokens.radius.md`，而它由
-    // `radius_tokens()` 从 `theme.radius` 直接推出来（mod.rs:288 `md: self.radius`）。
+    // 浮层容器（右键菜单、下拉菜单）的圆角是 `tokens.radius.md`，由
+    // `radius_tokens()` 从 `theme.radius` 直接推出来（mod.rs:289 `md: self.radius`）。
     // 菜单**项**的圆角则是 `theme.radius.min(px(8.))`（popup_menu.rs:1424）。
     //
     // 所以 radius 设 8 的话，容器和项都是 8 —— **内外一样大**，
     // 内容顶着容器边缘，看着就是「圆角太小」。
     //
-    // 设 12 之后：容器 12、项被 min 夹到 8，差一档，内容嵌在容器里。
-    // 这也是为什么之前我说「改不动」是错的 —— 上限只管内层，容器没有上限。
-    theme.radius = px(12.);
+    // 设 card(10)：容器 10、项被那个 min 夹到 8（正好落在 control 上），
+    // 差一档，内容嵌在容器里 —— 就是 Radius 里「卡片装控件」的那层关系。
+    // 之前这里写的是 px(12.)，12 不在 token 表里；浮层没有理由是唯一的例外，
+    // 而且 radius 还管着 Input 的圆角（input.rs:579），一处特例会漏到输入框上。
+    theme.radius = Radius::card();
     theme.radius_lg = Radius::card();
 
     let c = &mut theme.colors;
@@ -328,18 +360,20 @@ pub fn apply_theme(cx: &mut gpui::App) {
     // 这一个字段管住组件库里所有浮层（PopupMenu、Popover、下拉），
     // 因为它们的底色都从 `tokens.colors.surface` 取，而那个是从这里推的
     // （mod.rs 的 color_tokens：`surface: self.popover`）。
+    //
+    // 注意：光设这一行**不够** —— 浮层实际读的是 gpui_base 那份快照，
+    // 而快照在这之前就拍好了。函数末尾那段重投是配套的，别只留一半。
     c.popover = Tokens::overlay();
     c.popover_foreground = Tokens::ink();
-    // 副作用，记一下：浮层的描边走的是**全局** border（下面那个 `c.border`），
+    // 浮层的描边走的是**全局** border（下面那个 `c.border` = line，0x2e3033），
     // 组件库没有单独的 popover 边框色（popover_style 里就是
-    // `border_color(tokens.colors.border)`）。border 是 line（0x2e3033），
-    // 而 overlay 是 0x2f3034 —— 现在浮层的边框和它自己的底色几乎同色，
-    // 等于没有边框。
+    // `border_color(tokens.colors.border)`）—— line 和 overlay（0x2f3034）
+    // 几乎同色，等于没有边框。
     //
-    // 刻意不改：浮层靠「比下面所有东西都亮」+ shadow_lg 完成分离，
-    // 深色界面里这是常见做法。要给它一条可见的边就得把 border 整体提亮，
-    // 而那会动到页面上每一处描边（输入框、卡片、表格），
-    // 收益不清楚而波及面很大。
+    // 这条边在函数末尾**单独给了** line_strong：在那份快照里 border 的唯一
+    // 读者就是 popover_style，所以能只动浮层、不波及页面上其它描边。
+    // （原来这里记的是「刻意不改，提亮 border 会动到所有描边」——
+    // 那个顾虑只在 gpui_component 那侧成立，快照这侧没有。）
     c.secondary = Tokens::inset();
     c.secondary_foreground = Tokens::ink_2();
     c.secondary_hover = Tokens::hover();
@@ -362,4 +396,48 @@ pub fn apply_theme(cx: &mut gpui::App) {
     c.success = Tokens::green();
     c.success_foreground = Tokens::page();
     c.warning = Tokens::orange();
+
+    // ## 上面这些改动有一半到不了浮层 —— 必须手动把快照重投一次
+    //
+    // 踩过的坑，也是「右键菜单又黑又方」的真正原因：
+    //
+    // 画浮层容器的 `popover_style()` 不在 gpui-component 里，而在它底层的
+    // **gpui-base** 里（base/src/styled.rs:169），读的是 `cx.theme().tokens`。
+    // 那个 `cx.theme()` 解析到的是 `gpui_base::Theme` —— **另一个全局**，
+    // 和我们上面 `Theme::global_mut()` 拿到的 `gpui_component::Theme` 是两回事。
+    //
+    // 而它里面的 tokens 是**快照**：只在 `Theme::change()` 里算一次
+    // （ui/src/theme/mod.rs:196 `tokens: theme.semantic_tokens()`）。
+    // 我们的顺序是「先 change(Dark)、再改字段」，所以快照拍的是改之前的
+    // 库默认值，后面这几十行它一个都没看见。菜单**项**没这个问题 ——
+    // 它读 `cx.theme()` 时解析到 gpui_component 那个 Theme，取的是实时字段。
+    //
+    // 于是就是之前看到的样子：项按我们的 token 渲染（圆角 8、hover 是 accent_tint），
+    // 容器却还是库默认的 popover=neutral-950（近黑）+ radius=6 ——
+    // 外面比里面还方，底色也不是我们那套灰。
+    //
+    // 修法不是调数值，是补一次投影：字段改完之后重算 `semantic_tokens()`
+    // 写回 gpui_base 的全局。放在函数最末尾是必须的 —— 它是快照，
+    // 之后任何一处 `theme.xxx = ...` 都不会再自动同步过来。
+    //
+    // 注：`Theme::change()` 之后要是又切主题（跟随系统明暗之类），
+    // 快照会被重新拍成库默认值，这段得再跑一遍。目前只有深色一套、
+    // 启动时调一次，所以没做成 observer。
+    let tokens = theme.semantic_tokens();
+    // 结束对 gpui_component::Theme 的可变借用，才能再借 gpui_base 那个全局
+    let base = gpui_base::Theme::global_mut(cx);
+    base.tokens = tokens;
+    // 浮层的边框：这里能给它一条**看得见**的描边，而且不波及别处。
+    //
+    // 原来记的「不改」理由是「浮层边框走全局 border，提亮它会动到页面上
+    // 每一处描边」。那个前提只在 gpui-component 那侧成立 —— 在这个快照里，
+    // `colors.border` 的唯一读者就是 popover_style（base 里其余两处读的是
+    // ring，滚动条和 resize handle 走各自的字段）。所以单独抬这一个，
+    // 影响面正好只有浮层。
+    //
+    // 值取 line_strong，不是随手挑的：styles.css 里
+    // `--shadow-overlay: 0 0 0 1px var(--color-line-strong), ...`
+    // 写的就是浮层用 line_strong 那条 1px ring。等于把设计语言里
+    // 本来就属于浮层的那个值补回来。
+    base.tokens.colors.border = Tokens::line_strong();
 }

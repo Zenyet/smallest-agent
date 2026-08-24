@@ -1904,7 +1904,7 @@ fn merge_sessions(disk: Vec<SessionMeta>, local: &[SessionMeta]) -> Vec<SessionM
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 分组逻辑在 projects.rs（纯函数、可单测），这里只把两份数据交给它
         let groups = projects::group_sessions(&self.sessions, &self.projects);
         let current_id = self.current_id.clone();
@@ -2143,6 +2143,7 @@ impl Render for ChatView {
                         cx.notify();
                     }),
                 },
+                window,
                 cx,
             ))
             .child(self.render_content(cx))
@@ -2223,6 +2224,14 @@ impl ChatView {
             // 其余间距（消息之间、轮次之间）由每条消息自己负责 ——
             // 它们不均等（用户消息上方要更大），统一 gap 表达不了
             .overflow_y_scroll()
+            // 配套 theme.rs 里代码块那个 restrict_scroll_to_axis，缺一半就还会串轴。
+            //
+            // 这一侧治的是「横向滚动带出纵向」：默认（false）下这个只声明了
+            // y 轴滚动的容器，收到横向增量时会把 `delta.x` 当成 `delta_y`
+            // 用（div.rs:3226），于是在代码块上左右滚，整个对话区跟着上下跑。
+            //
+            // 两边都设上，触控板的斜向手势才会锁在主轴上而不是互相串。
+            .restrict_scroll_to_axis()
             .track_scroll(&self.scroll);
 
         // 窗口化：只渲染最近 VISIBLE_LIMIT 条，更早的折起来。

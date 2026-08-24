@@ -39,6 +39,18 @@ gpui_platform = { git = "https://github.com/zed-industries/zed", features = [
 ] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component" }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+# gpui-component 的底层 crate，同一个仓库的另一个 workspace 成员。
+#
+# 直接依赖它不是为了用它的组件，而是因为**浮层的样式来自它的那个 Theme 全局**，
+# 而 gpui-component 没把它 re-export 出来（ui/src/lib.rs 只导了
+# ColorTokens / RadiusTokens 那几个类型，没有 Theme 本身）。
+# 不加这个依赖就够不到它，右键菜单的底色和圆角就改不动 —— 详见 theme.rs
+# `apply_theme` 末尾那段。
+#
+# 同样不写 rev，理由和上面 gpui 那段一致：要和 gpui-component 自己的声明
+# 保持同源，否则 cargo 会当成两个源各编一份，SemanticThemeTokens 就成了
+# 「另一份 gpui-base 的类型」，赋值直接编译不过。
+gpui-base = { git = "https://github.com/longbridge/gpui-component" }
 # 事件通道：接收端要在 gpui 的执行器上 await，tokio 的 channel 不行。
 # 见 src/bridge.rs 文件头。
 smol = "2"

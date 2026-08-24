@@ -6305,6 +6305,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "gpui",
+ "gpui-base",
  "gpui-component",
  "gpui-component-assets",
  "gpui_platform",

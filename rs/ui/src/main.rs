@@ -11,6 +11,7 @@
 mod assets;
 mod bridge;
 mod chat;
+mod context_menu;
 mod history;
 mod msg_times;
 mod pages;
