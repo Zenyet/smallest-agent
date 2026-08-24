@@ -11,6 +11,7 @@ import type {
   Message,
   ApprovalRequestEvent,
 } from '../../shared/channels'
+import { hydrateMessages } from './hydrate'
 
 export interface ChatMessage {
   role: 'user' | 'assistant'
@@ -94,11 +95,13 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
       // 需要另加一条「重载时校验这轮是否真的还在跑」的机制。
       return update(state, action.sessionId, (chat) => ({
         ...chat,
-        messages: action.messages
-          // tool 消息是喂给模型的中间结果，不在历史回放里展示
-          .filter((m): m is Message & { role: 'user' | 'assistant' } =>
-            m.role === 'user' || m.role === 'assistant')
-          .map((m) => ({ role: m.role, content: m.content, tools: [], streaming: false })),
+        // 工具调用要还原出来，不能丢。
+        //
+        // 原来这里是 `.filter(user|assistant).map(... tools: [])` —— 两处丢数据：
+        // tool 消息被过滤掉、tools 又硬编码成空数组。结果是重开 app 之后
+        // 历史里只剩正文。而 toolCalls 一直都在磁盘上。
+        // 算法见 hydrate.ts（那边是纯函数，有单测）。
+        messages: hydrateMessages(action.messages, action.sessionId),
         // error 不持久化（它是运行时状态，没写进 .json），所以回放时显式清掉，
         // 避免上一轮的错误标记残留在新加载的历史上。
         error: undefined,

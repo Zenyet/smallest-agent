@@ -72,6 +72,48 @@ describe('MessageBubble', () => {
     expect(container.querySelectorAll('.tool-group')).toHaveLength(2)
   })
 
+  // ## 这几条锁的是一个真 bug
+  //
+  // 复制按钮原来写在 StreamingText 里，条件是 `!message.streaming`，
+  // 而那个组件只在 streaming 为 true 时被渲染 —— 两个条件互斥，
+  // 所以那个按钮**从来没出现过**。没有测试覆盖，所以它悄悄存在了很久。
+  it('答完的助手消息有复制按钮', () => {
+    render(<MessageBubble message={msg()} />)
+    expect(screen.getByLabelText('复制')).toBeTruthy()
+  })
+
+  it('流式中的消息也有复制按钮', () => {
+    // 这是原来那个死分支覆盖不到的另一半：流式时也该能复制已收到的部分
+    render(<MessageBubble message={msg({ streaming: true, content: '半截' })} />)
+    expect(screen.getByLabelText('复制')).toBeTruthy()
+  })
+
+  it('用户消息也有复制按钮', () => {
+    render(<MessageBubble message={msg({ role: 'user', content: '我的提问' })} />)
+    expect(screen.getByLabelText('复制')).toBeTruthy()
+  })
+
+  it('空内容不给复制按钮', () => {
+    // 一个字符都没收到时冒出个空拷贝按钮是假的
+    expect(
+      render(<MessageBubble message={msg({ content: '' })} />).container.querySelector(
+        '[aria-label="复制"]',
+      ),
+    ).toBeNull()
+  })
+
+  it('点复制写入剪贴板并给出已复制反馈', async () => {
+    const written: string[] = []
+    Object.assign(navigator, {
+      clipboard: { writeText: (t: string) => (written.push(t), Promise.resolve()) },
+    })
+    render(<MessageBubble message={msg({ content: '要复制的正文' })} />)
+    fireEvent.click(screen.getByLabelText('复制'))
+    expect(written).toEqual(['要复制的正文'])
+    // 反馈：按钮的 aria-label 变成「已复制」，用户才知道点生效了
+    expect(await screen.findByLabelText('已复制')).toBeTruthy()
+  })
+
   it('单个 turn 的工具调用折叠在一起', () => {
     render(<MessageBubble message={msg({ tools: [toolEvent] })} />)
     // 折叠时看不到工具名本身（被包在 ToolCallGroup 里），只看到"本轮 N 次"
