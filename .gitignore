@@ -8,3 +8,5 @@ models
 eval-results.json
 out
 dist-electron
+# Rust 构建产物。跑过 cargo 之后 rs/target 会有几十 GB，且完全可再生。
+rs/target
