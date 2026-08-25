@@ -13,6 +13,13 @@ export const CH = {
   deleteSession: 'agent:delete-session',
   loadSession: 'agent:load-session',
   sendMessage: 'agent:send-message',
+  // 停止正在跑的那一轮。取消是**轮边界**的：当前轮的模型请求和已开跑的工具
+  // 会跑完，到下一轮 callModel 入口才停（见 main/cancel.ts 的文件头）。
+  //
+  // 做成 invoke 而不是 send：调用方（停止按钮）要知道「这次点击有没有被受理」，
+  // 而不是发出去就假装停了。取消一个没在跑的会话返回 false，不报错 ——
+  // 用户可能在 cancelled 事件到达前又点了一次。
+  cancelMessage: 'agent:cancel-message',
   getSettings: 'agent:get-settings',
   saveSettings: 'agent:save-settings',
   restartApp: 'agent:restart-app',
@@ -31,6 +38,11 @@ export const CH = {
   showContextMenu: 'agent:show-context-menu',
   assignSession: 'agent:assign-session',
   toggleProjectCollapsed: 'agent:toggle-project-collapsed',
+  // 会话重命名。用户起的标题存在主进程的 electron-store 里（session-titles.ts）——
+  // 会话文件的形状由 src/ 决定（就是 Message[]），塞不进去。
+  // 和 projects 那几个一样，写操作返回写完之后的完整表，renderer 不自己推算。
+  getSessionTitles: 'agent:get-session-titles',
+  renameSession: 'agent:rename-session',
   // Provider detection（两段式）
   detectProviders: 'agent:detect-providers',
   importProvider: 'agent:import-provider',
@@ -47,6 +59,9 @@ export const CH = {
   verdict: 'agent:verdict',
   cacheHit: 'agent:cache-hit',
   error: 'agent:error',
+  // 那一轮真的停下了。**不走 error 通道**：用户主动停止不是错误，
+  // 前端不该把它渲染成红色报错。
+  cancelled: 'agent:cancelled',
   runtimeStatus: 'agent:runtime-status',
   // 设置改了：主进程广播给所有窗口（含设置窗口自己）。两个 renderer 之后，
   // 谁写的设置谁知道已经不够了 —— 主窗口得从这里听说，否则它手里那份是死的。
@@ -87,17 +102,28 @@ export interface CacheHitEvent {
   sessionId: string
 }
 
+// 那一轮被用户停下了。
+//
+// 单独一个事件而不是复用 ErrorEvent：取消不是错误。前端收到它要清掉
+// loading 态、把停止键复原，但**不该**显示红色报错 —— 那会让用户以为
+// 自己的操作出了问题。
+//
+// 载荷只有 sessionId：取消路径上已经 sessions.save() 存过盘了（保住已经
+// 产生的那几轮对话），前端下次 loadSession 就能拿到，不需要在事件里回传。
+export interface CancelledEvent {
+  sessionId: string
+}
+
 // 没有 TOOL_ERROR：runTool 把工具异常包成 JSON 返回给模型，不会中断循环，
 // 因此工具失败以 ToolCallEvent.output 的形式展示，不走这里。
-// DELETE_BLOCKED：删除一个正在被 agent 处理的会话被主进程拒绝——没有真正的取消机制
-// （src/ 冻结，runAgent 跑起来就停不下来），只能不让删，并把理由说清楚。
-export type ErrorCode =
-  | 'API_KEY_MISSING'
-  | 'MODEL_ERROR'
-  | 'MAX_TURNS'
-  | 'BUSY'
-  | 'DELETE_BLOCKED'
-  | 'UNKNOWN'
+//
+// 也没有取消相关的码：取消走 CancelledEvent，不是错误。
+//
+// DELETE_BLOCKED 已经删掉了。它当初的理由是「没有真正的取消机制（src/ 冻结，
+// runAgent 跑起来就停不下来），只能不让删」—— 那个前提不成立了：callModel
+// 是注入的，包一层就能在轮边界停下（见 main/cancel.ts）。现在删除正在跑的
+// 会话走「先取消、等它停下、再删」，不再拒绝用户。
+export type ErrorCode = 'API_KEY_MISSING' | 'MODEL_ERROR' | 'MAX_TURNS' | 'BUSY' | 'UNKNOWN'
 
 export interface ErrorEvent {
   sessionId: string

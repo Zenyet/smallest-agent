@@ -101,6 +101,14 @@ const PATHS: Record<string, ReactNode> = {
   // 发送：向上箭头（作为按钮图标，非文字）
   send: <path d="M12 19V5M5 12l7-7 7 7" />,
 
+  // 停止：圆角方块。跑起来时发送键换成它（不是并排加一个按钮 ——
+  // composer 那行右下角只放一个控件，见下面 send 附近的注释）。
+  //
+  // 用实心方块而不是空心：这一格在跑动时是唯一可点的东西，
+  // 实心比线框更像「按钮」。fill 显式给 currentColor —— 这套图标默认
+  // fill=none，只有它是例外。
+  stop: <rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor" />,
+
   // 复制
   copy: (
     <>

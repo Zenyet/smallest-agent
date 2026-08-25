@@ -26,6 +26,22 @@
   --color-inset: #1f2022;
   --color-field: #2b2c2f;
 
+  /* --- 浮层 ---
+   *
+   * 为什么浮层不能直接用 surface：surface(#232427) 只比 page(#17181a) 亮一点点，
+   * 而浮层是这套色阶里离观察者最近的一层 —— 它悬在所有内容之上，色阶上必须
+   * 明显更亮，否则看着像沉进背景里而不是浮在上面（表现出来就是「弹出来那块太黑了」）。
+   *
+   * overlay 抬到 #2f3034：比 surface 亮一档、比 field(#2b2c2f) 也亮 ——
+   * 浮层里可能装着输入控件，装它的容器不该比里面的东西暗。
+   *
+   * overlay-hover 比 overlay 再亮一档：页面上那个 hover(#2a2b2e) 在浮层里
+   * 比底色还暗，划过去会反过来看着像凹陷。
+   *
+   * 这两个值和 rs/ui/src/theme.rs 的 Tokens::overlay / overlay_hover 一致。 */
+  --color-overlay: #2f3034;
+  --color-overlay-hover: #3b3c41;
+
   /* --- 文字：三级，别再加第四级 --- */
   --color-ink: #f2f3f4;
   --color-ink-2: #a5a8ad;

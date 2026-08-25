@@ -161,10 +161,68 @@ describe('ChatWindow', () => {
     expect(input.value).toBe('')
   })
 
-  it('运行中禁用输入框和发送按钮（agent 是串行的）', () => {
+  it('运行中禁用输入框；没给 onCancel 时发送键仍在但不可点', () => {
+    // 不传 onCancel 的场景（比如设置窗口那类只读用法）：退回原来的行为，
+    // 发送键还在、禁用。传了 onCancel 才换成停止键，见下一条。
     render(<ChatWindow chat={{ ...idle, running: true }} sessionId="s1" onSend={() => {}} onDecide={() => {}} />)
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(true)
     expect((screen.getByRole('button', { name: /发送/ }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  // 跑起来时右下角**换成**停止键，不是并排再加一个 —— composer 那行右下角
+  // 只有一个控件位，两个键并排会同时有一个是灰的，占位又不可点。
+  it('运行中把发送键换成停止键', () => {
+    render(
+      <ChatWindow
+        chat={{ ...idle, running: true }}
+        sessionId="s1"
+        onSend={() => {}}
+        onCancel={() => {}}
+        onDecide={() => {}}
+      />,
+    )
+    expect(screen.getByRole('button', { name: /停止/ })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: /发送/ })).toBeNull()
+  })
+
+  it('点停止键回调 onCancel', () => {
+    let stopped = 0
+    render(
+      <ChatWindow
+        chat={{ ...idle, running: true }}
+        sessionId="s1"
+        onSend={() => {}}
+        onCancel={() => {stopped += 1}}
+        onDecide={() => {}}
+      />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /停止/ }))
+    expect(stopped).toBe(1)
+  })
+
+  it('没在跑时没有停止键', () => {
+    render(
+      <ChatWindow chat={idle} sessionId="s1" onSend={() => {}} onCancel={() => {}} onDecide={() => {}} />,
+    )
+    expect(screen.queryByRole('button', { name: /停止/ })).toBeNull()
+    expect(screen.getByRole('button', { name: /发送/ })).toBeTruthy()
+  })
+
+  // 别的会话占着串行锁时不给停止键 —— 那时该点的是横幅上的「去看看」。
+  // 在这里放停止键等于让用户从 A 会话去停 B 会话，而 runner.cancel 也只认
+  // 正在跑的那个 sessionId，点了不会有任何效果。
+  it('被别的会话阻塞时不给停止键', () => {
+    render(
+      <ChatWindow
+        chat={idle}
+        sessionId="s1"
+        onSend={() => {}}
+        onCancel={() => {}}
+        onDecide={() => {}}
+        blockedBy={{ sessionId: 's2', title: '另一个会话', pendingApproval: false }}
+      />,
+    )
+    expect(screen.queryByRole('button', { name: /停止/ })).toBeNull()
   })
 
   it('空输入不触发发送', () => {
@@ -304,9 +362,9 @@ describe('SessionList', () => {
     },
   ]
 
-  // 删除/移除的入口是原生右键菜单，组件只负责报告「哪一项被右键了」，
-  // 所以这里的桩是 onSessionContextMenu / onProjectContextMenu，
-  // 不再是直接的 onDelete / onRemoveProject。
+  // 删除/移除/改名的入口是右键菜单（现在是自绘的，见 components/ContextMenu.tsx），
+  // 组件只负责报告「哪一项被右键了 + 光标在哪」，所以这里的桩是
+  // onSessionContextMenu / onProjectContextMenu，不是直接的 onDelete。
   const noop = {
     onSelect: () => {},
     onCreate: () => {},
@@ -316,6 +374,9 @@ describe('SessionList', () => {
     onSelectProject: () => {},
     onSessionContextMenu: () => {},
     onProjectContextMenu: () => {},
+    renamingId: null,
+    onRename: () => {},
+    onCancelRename: () => {},
   }
 
   it('列出所有会话', () => {
@@ -350,22 +411,24 @@ describe('SessionList', () => {
   })
 
   // 原来这里测的是行尾那个 ✕：点它触发 onDelete、且不冒泡到行的 onSelect。
-  // 那个按钮已经去掉了，删除改走原生右键菜单，所以这条测试的前提整体换掉：
-  // 现在要守的是「右键会话上报的是这一行的 id 和标题」，删除动作本身由
-  // App.tsx 在菜单返回后调用（那部分是 App 的职责，不在这个组件里）。
-  it('右键会话上报 id 和标题，供上层弹原生菜单', () => {
-    const targets: [string, string][] = []
+  // 那个按钮已经去掉了，删除改走右键菜单（现在是自绘的，见 ContextMenu.tsx），
+  // 所以这条测试的前提整体换掉：现在要守的是「右键会话上报这一行的 id、标题
+  // 和光标坐标」，删除动作本身由 App.tsx 在拿到菜单项后调用。
+  //
+  // 坐标必须一起上报：菜单要钉在右键那一下的位置，而 App 收不到那个事件。
+  it('右键会话上报 id、标题和光标坐标', () => {
+    const targets: [string, string, { x: number; y: number }][] = []
     render(
       <SessionList
         groups={groups}
         currentId="s1"
         currentProjectId="p1"
         {...noop}
-        onSessionContextMenu={(id, title) => targets.push([id, title])}
+        onSessionContextMenu={(id, title, at) => targets.push([id, title, at])}
       />,
     )
-    fireEvent.contextMenu(screen.getByText('会话二'))
-    expect(targets).toEqual([['s2', '会话二']])
+    fireEvent.contextMenu(screen.getByText('会话二'), { clientX: 120, clientY: 88 })
+    expect(targets).toEqual([['s2', '会话二', { x: 120, y: 88 }]])
   })
 
   it('右键会话不触发 onSelect（右键是「对这一项做点什么」，不是打开它）', () => {
@@ -380,6 +443,121 @@ describe('SessionList', () => {
       />,
     )
     fireEvent.contextMenu(screen.getByText('会话二'))
+    expect(picked).toEqual([])
+  })
+
+  // --- 就地改名 ---
+  // 就地编辑而不是弹对话框：改名是个轻动作，弹窗要用户先看清标题再点确定，
+  // 反而多两步（gpui 侧 sidebar.rs 记的是同一条理由）。
+
+  it('renamingId 指向的那一行换成输入框，标题不再显示', () => {
+    render(<SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} renamingId="s2" />)
+    const input = screen.getByRole('textbox') as HTMLInputElement
+    expect(input.value).toBe('会话二')
+    // 那一行的标题文字被输入框顶掉了
+    expect(screen.queryByText('会话二')).toBeNull()
+    // 别的行不受影响
+    expect(screen.getByText('会话一')).toBeTruthy()
+  })
+
+  it('回车提交新标题', () => {
+    const renamed: [string, string][] = []
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        renamingId="s2"
+        onRename={(id, title) => renamed.push([id, title])}
+      />,
+    )
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '改过的名字' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(renamed).toEqual([['s2', '改过的名字']])
+  })
+
+  // 空标题 = 恢复自动推导的名字（主进程侧 withTitle 会删掉那条覆盖）
+  it('提交空标题也交出去，由主进程决定恢复默认名', () => {
+    const renamed: [string, string][] = []
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        renamingId="s2"
+        onRename={(id, title) => renamed.push([id, title])}
+      />,
+    )
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(renamed).toEqual([['s2', '']])
+  })
+
+  it('Esc 放弃改名，不提交', () => {
+    const renamed: string[] = []
+    let cancelled = 0
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        renamingId="s2"
+        onRename={(id) => renamed.push(id)}
+        onCancelRename={() => {cancelled += 1}}
+      />,
+    )
+    const input = screen.getByRole('textbox')
+    fireEvent.change(input, { target: { value: '不想要的名字' } })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(cancelled).toBe(1)
+    expect(renamed).toEqual([])
+  })
+
+  // 失焦按放弃而不是提交：点到别处通常是「算了」，静默改掉名字会让人
+  // 不确定自己刚干了什么
+  it('失焦放弃改名，不提交', () => {
+    const renamed: string[] = []
+    let cancelled = 0
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        renamingId="s2"
+        onRename={(id) => renamed.push(id)}
+        onCancelRename={() => {cancelled += 1}}
+      />,
+    )
+    fireEvent.blur(screen.getByRole('textbox'))
+    expect(cancelled).toBe(1)
+    expect(renamed).toEqual([])
+  })
+
+  // 和主进程的 TITLE_MAX 一致，免得用户敲了一长串、回车之后被静默截断
+  it('输入框限长 60', () => {
+    render(<SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} renamingId="s2" />)
+    expect((screen.getByRole('textbox') as HTMLInputElement).maxLength).toBe(60)
+  })
+
+  it('改名中的那一行点了不触发 onSelect', () => {
+    const picked: string[] = []
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        renamingId="s2"
+        onSelect={(id) => picked.push(id)}
+      />,
+    )
+    fireEvent.click(screen.getByRole('textbox'))
     expect(picked).toEqual([])
   })
 

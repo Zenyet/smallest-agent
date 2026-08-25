@@ -13,12 +13,9 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   MODEL_ERROR: '模型调用失败，请检查网络或 API 配额',
   MAX_TURNS: 'Agent 反复调用工具未能收敛，已停止（可在设置中调大 MAX_TURNS）',
   BUSY: '上一个问题还在处理中，请稍候',
-  // src/ 冻结、runAgent 没有取消机制，所以正在跑的会话不让删（删了那一轮还会继续跑完
-  // 并把文件写回来，会话就"复活"了）。等它跑完再删。
-  //
-  // 措辞刻意不说"这个会话"：侧边栏的 ✕ 对任何会话都可点，而反馈显示在当前打开的会话上，
-  // 两者常常不是同一个。具体是哪个由 error.message 点名（见 App.tsx 的 remove）。
-  DELETE_BLOCKED: '删不掉：目标会话还在处理中',
+  // DELETE_BLOCKED 已经没了：正在跑的会话现在会被先取消再删，不再拒绝用户
+  // （见 main/cancel.ts 和 ipc-handlers.ts 的 deleteSession）。删除的真故障
+  // 走 UNKNOWN，具体原因由 error.message 点名（见 App.tsx 的 remove）。
   UNKNOWN: '出错了',
 }
 
@@ -36,6 +33,7 @@ export function ChatWindow({
   chat,
   sessionId,
   onSend,
+  onCancel,
   onDecide,
   blockedBy,
   onJumpToBlocking,
@@ -43,6 +41,8 @@ export function ChatWindow({
   chat: SessionChat
   sessionId: string
   onSend: (text: string) => void
+  // 停止这个会话正在跑的那一轮。可选：设置窗口那类地方不需要。
+  onCancel?: () => void
   onDecide: (decision: ApprovalDecision) => void
   blockedBy?: BlockedBy
   onJumpToBlocking?: () => void
@@ -89,6 +89,10 @@ export function ChatWindow({
 
   const blocked = chat.running || Boolean(blockedBy)
   const canSend = !blocked && text.trim().length > 0
+  // 只在**这个**会话自己在跑时给停止键。别的会话占着串行锁时（blockedBy）
+  // 不给 —— 那时该点的是横幅上的「去看看」，在这里放停止键等于让用户
+  // 从 A 会话去停 B 会话，而 runner.cancel 也只认正在跑的那个 sessionId。
+  const canStop = chat.running && Boolean(onCancel)
 
   const submit = () => {
     if (!canSend) return
@@ -195,19 +199,38 @@ export function ChatWindow({
             className="min-h-7 w-full resize-none bg-transparent px-1 py-1 font-[inherit] text-[13px] leading-[18px] text-ink outline-none [overflow-wrap:anywhere] placeholder:text-ink-3 disabled:opacity-60"
           />
           {/* 左侧没有放「+」：截图里的附件入口对应不到任何现有功能，放一个
-              点了没反应的按钮比空着更糟（见 task 说明）。右下角只留发送。 */}
+              点了没反应的按钮比空着更糟（见 task 说明）。右下角只留发送。
+
+              跑起来时这一格**换成**停止键，不是并排再加一个：这一行右下角
+              只有一个控件位，而「跑着的时候不能发送」已经由 canSend 保证 ——
+              两个键并排会同时有一个是灰的，占位又不可点。 */}
           <div className="flex items-center justify-end">
-            <button
-              type="button"
-              aria-label="发送"
-              onClick={submit}
-              disabled={!canSend}
-              className={`flex size-7 shrink-0 items-center justify-center rounded-full transition-[background-color,transform] duration-150 enabled:active:scale-[0.94] disabled:cursor-not-allowed ${
-                canSend ? 'bg-ink text-surface' : 'bg-line-strong text-ink-2'
-              }`}
-            >
-              <Icon name="send" size={16} strokeWidth={2.4} />
-            </button>
+            {canStop ? (
+              <button
+                type="button"
+                aria-label="停止"
+                onClick={onCancel}
+                // 停止是轮边界的：点了之后当前这轮的模型请求和已开跑的工具
+                // 会跑完才停（见 main/cancel.ts）。所以 title 里说明一下，
+                // 否则长工具下用户会以为按钮没反应又连点几次。
+                title="停止（当前这一步跑完后停下）"
+                className="flex size-7 shrink-0 items-center justify-center rounded-full bg-ink text-surface transition-[background-color,transform] duration-150 active:scale-[0.94]"
+              >
+                <Icon name="stop" size={16} strokeWidth={2.4} />
+              </button>
+            ) : (
+              <button
+                type="button"
+                aria-label="发送"
+                onClick={submit}
+                disabled={!canSend}
+                className={`flex size-7 shrink-0 items-center justify-center rounded-full transition-[background-color,transform] duration-150 enabled:active:scale-[0.94] disabled:cursor-not-allowed ${
+                  canSend ? 'bg-ink text-surface' : 'bg-line-strong text-ink-2'
+                }`}
+              >
+                <Icon name="send" size={16} strokeWidth={2.4} />
+              </button>
+            )}
           </div>
         </div>
       </div>

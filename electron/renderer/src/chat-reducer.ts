@@ -7,6 +7,7 @@ import type {
   ToolCallEvent,
   VerdictEvent,
   CacheHitEvent,
+  CancelledEvent,
   ErrorEvent,
   Message,
   ApprovalRequestEvent,
@@ -42,6 +43,7 @@ export type ChatAction =
   | { type: 'verdict'; event: VerdictEvent }
   | { type: 'cache-hit'; event: CacheHitEvent }
   | { type: 'error'; event: ErrorEvent }
+  | { type: 'cancelled'; event: CancelledEvent }
   | { type: 'approval-request'; event: ApprovalRequestEvent }
   | { type: 'approval-settled'; sessionId: string; requestId: string }
   // 重新挂载后用 getRunnerSnapshot 补状态：这个 sessionId 在主进程里已经在跑，
@@ -148,6 +150,22 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         running: false,
         error: { code: action.event.code, message: action.event.message },
         // 这轮失败了，审批弹窗同样已失效（跟 complete 的理由一样）。
+        pendingApproval: undefined,
+      }))
+
+    case 'cancelled':
+      // 用户主动停的那一轮。和 error 的区别只有一个但很关键：**不设 error**。
+      // 走 error 分支会让 ChatWindow 渲染出红色报错，用户以为自己的操作
+      // 出了问题 —— 而这本来就是他要的结果。
+      //
+      // 已经流出来的那段 assistant 文字保留在 messages 里不动：那是真实发生
+      // 过的输出，抹掉它等于骗用户「什么都没发生」。主进程那侧也存了盘
+      // （agent-runner 的取消分支），刷新后还在。
+      return update(state, action.event.sessionId, (chat) => ({
+        ...chat,
+        running: false,
+        // 停止的同时把悬着的审批弹窗收掉：那一轮已经不跑了，
+        // 留个等确认的框在屏幕上没有意义（跟 complete / error 同一个理由）
         pendingApproval: undefined,
       }))
 

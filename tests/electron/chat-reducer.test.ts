@@ -105,6 +105,46 @@ describe('chatReducer', () => {
     expect(s.s2.error?.code).toBe('BUSY')
   })
 
+  it('cancelled 结束运行状态但**不设 error**（用户主动停的不是错误）', () => {
+    const s = apply(
+      empty,
+      { type: 'user-sent', sessionId: 's1', text: 'q' },
+      { type: 'cancelled', event: { sessionId: 's1' } },
+    )
+    expect(s.s1.running).toBe(false)
+    // 这条是 cancelled 单独一个 action 而不是复用 error 的全部理由：
+    // 走 error 会渲染出红色报错，而这本来就是用户要的结果
+    expect(s.s1.error).toBeUndefined()
+  })
+
+  it('cancelled 保留已经流出来的文字（那是真实发生过的输出）', () => {
+    const s = apply(
+      empty,
+      { type: 'user-sent', sessionId: 's1', text: 'q' },
+      { type: 'chunk', event: { sessionId: 's1', text: '答到一半' } },
+      { type: 'cancelled', event: { sessionId: 's1' } },
+    )
+    expect(s.s1.messages.at(-1)?.content).toBe('答到一半')
+  })
+
+  it('cancelled 收掉悬着的审批弹窗', () => {
+    const s = apply(
+      empty,
+      { type: 'user-sent', sessionId: 's1', text: 'q' },
+      {
+        type: 'approval-request',
+        event: {
+          sessionId: 's1',
+          requestId: 'r1',
+          toolName: 'write_file',
+          args: {},
+        } as ApprovalRequestEvent,
+      },
+      { type: 'cancelled', event: { sessionId: 's1' } },
+    )
+    expect(s.s1.pendingApproval).toBeUndefined()
+  })
+
   it('loaded 用磁盘历史替换该会话的消息（切换会话时用）', () => {
     const s = chatReducer(empty, {
       type: 'loaded',

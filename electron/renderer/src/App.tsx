@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'r
 import { SessionList } from './components/SessionList'
 import { ChatWindow, type BlockedBy } from './components/ChatWindow'
 import { StartupScreen } from './components/StartupScreen'
+import { ContextMenu, CLOSED, type ContextMenuState } from './components/ContextMenu'
 import { chatReducer, emptySession } from './chat-reducer'
 import { groupSessions } from '../../main/projects'
 import { api } from './api'
@@ -54,6 +55,12 @@ export function App() {
   // 当前选中的项目：决定新会话落在哪儿。跟 currentId（当前会话）是两件事——
   // 用户可以选中一个项目却不打开它下面任何会话（比如刚添加完，里面还是空的）。
   const [currentProjectId, setCurrentProjectId] = useState<string | null>(null)
+  // 右键菜单：自绘（components/ContextMenu.tsx）。主进程只回「有哪几项」，
+  // 弹出、定位、关闭都在这边。
+  const [menu, setMenu] = useState<ContextMenuState>(CLOSED)
+  // 正在改名的会话 id。null = 没在改名。改名的输入框就地替换那一行的标题
+  // （对应 gpui 侧 sidebar.rs 的 renaming 状态）。
+  const [renamingId, setRenamingId] = useState<string | null>(null)
   // remove() 发起删除的那一刻起同步打上 tombstone，见上面 mergeSessions 的注释。
   // 用 ref 而不是 state：它不需要触发渲染，只需要在异步空档里被任何并发调用
   // 同步地看到——用 state 的话，读到的可能是还没被这次 setState 提交的旧值。
@@ -69,6 +76,7 @@ export function App() {
       api.onCacheHit((event) => dispatch({ type: 'cache-hit', event })),
       api.onVerdict((event) => dispatch({ type: 'verdict', event })),
       api.onError((event) => dispatch({ type: 'error', event })),
+      api.onCancelled((event) => dispatch({ type: 'cancelled', event })),
       api.onApprovalRequest((event) => dispatch({ type: 'approval-request', event })),
       // 项目状态的广播。这个窗口自己的写操作已经用返回值更新过一次了，
       // 但广播是"任何来源的改动都到得了每个窗口"的那条通路，两者不冲突
@@ -206,22 +214,25 @@ export function App() {
       try {
         await api.deleteSession(id)
       } catch (err) {
-        // 主进程拒绝了（大概率是这个会话正在被 agent 处理，见 ipc-handlers.ts）。
-        // 撤销 tombstone——它没被真的删掉，不该继续被排除在合并结果之外。
+        // 删除失败。**不再有 DELETE_BLOCKED 这一类**：正在跑的会话现在会被
+        // 主进程先取消再删（ipc-handlers.ts 的 deleteSession），不会拒绝用户。
+        // 能走到这里的只剩真故障 —— 文件权限、磁盘满之类。
+        //
+        // 撤销 tombstone：它没被真的删掉，不该继续被排除在合并结果之外。
         deletedIdsRef.current.delete(id)
         // 反馈挂在当前打开的会话上（用户点删除时眼睛在哪儿，反馈就出现在哪儿），
-        // 但被拒的未必是当前这个 —— 侧边栏的 ✕ 对任何会话都可点。
-        // 所以文案必须点名是哪个会话，否则会把当前打开的这个误指成"正在处理中"的那个。
-        const blocked = sessions.find((s) => s.id === id)
+        // 但失败的未必是当前这个 —— 侧边栏的 ✕ 对任何会话都可点。
+        // 所以文案要点名是哪个会话。
+        const target = sessions.find((s) => s.id === id)
         if (currentId) {
           dispatch({
             type: 'error',
             event: {
               sessionId: currentId,
-              code: 'DELETE_BLOCKED',
-              message: blocked
-                ? `「${blocked.title}」还在处理中，等它跑完再删。`
-                : '那个会话还在处理中，等它跑完再删。',
+              code: 'UNKNOWN',
+              message: target
+                ? `删不掉「${target.title}」：${err instanceof Error ? err.message : String(err)}`
+                : `删除失败：${err instanceof Error ? err.message : String(err)}`,
             },
           })
         }
@@ -236,6 +247,22 @@ export function App() {
     },
     [currentId, sessions],
   )
+
+  // 停止当前会话正在跑的那一轮。
+  //
+  // **不在这里乐观地清 running**：取消是轮边界的，点完之后那一轮还在跑
+  // （当前的模型请求和已开跑的工具要跑完）。提前清掉会让 composer 立刻可用，
+  // 而这时发新消息会撞上串行锁吃一个 BUSY —— 用户看到的是「停了但发不出去」。
+  // 等主进程的 cancelled 事件到达再清，那时它才是真的停了。
+  const cancel = useCallback(() => {
+    if (!currentId) return
+    // 返回值是「有没有受理」。没受理（那一轮刚好自己结束了）就什么都不做 ——
+    // running 会由 complete 事件清掉。
+    api.cancelMessage(currentId).catch(() => {
+      // 取消这次 IPC 往返失败不值得弹错：那一轮要么还在跑（用户可以再点一次），
+      // 要么已经结束（complete/error 会清掉 running）。两种情况都不是死局。
+    })
+  }, [currentId])
 
   const send = useCallback(
     (text: string) => {
@@ -333,29 +360,68 @@ export function App() {
           currentProjectId={currentProjectId}
           onSelect={(id) => void select(id)}
           onCreate={() => void create()}
-          // 右键菜单：SessionList 只报告「哪一项被右键了」，菜单内容和弹出都在
-          // 主进程（原生菜单，见 main/context-menu.ts）。选了动作才落到删除逻辑上，
-          // 删除本身没变 —— 包括正在跑的会话会被拒（DELETE_BLOCKED）和 tombstone。
-          onSessionContextMenu={(id, title) => {
+          // 右键菜单：SessionList 只报告「哪一项被右键了 + 光标在哪」，菜单内容
+          // 从主进程拿（menuFor，产品决定留在那一侧），弹出和关闭在这边自绘。
+          // 删除本身没变 —— 包括 tombstone；正在跑的会话现在会先取消再删。
+          onSessionContextMenu={(id, title, at) => {
             void api
               .showContextMenu({ kind: 'session', id, title })
-              .then((action) => {
-                if (action === 'delete-session') void remove(id)
+              .then((specs) => {
+                setMenu({
+                  at,
+                  items: specs.map((spec) => ({
+                    label: spec.label,
+                    destructive: spec.destructive,
+                    onSelect: () => {
+                      if (spec.action === 'delete-session') void remove(id)
+                      // 改名不在这里落盘：先把这一行换成输入框，用户敲完
+                      // 回车才写（见 SessionList 的 renaming 分支）
+                      if (spec.action === 'rename-session') setRenamingId(id)
+                    },
+                  })),
+                })
               })
               .catch((err: unknown) => {
-                console.error('[context-menu] 弹出失败：', err instanceof Error ? err.message : err)
+                console.error('[context-menu] 取菜单项失败：', err instanceof Error ? err.message : err)
               })
           }}
-          onProjectContextMenu={(id, name) => {
+          onProjectContextMenu={(id, name, at) => {
             void api
               .showContextMenu({ kind: 'project', id, name })
-              .then((action) => {
-                if (action === 'remove-project') void removeProjectById(id)
+              .then((specs) => {
+                setMenu({
+                  at,
+                  items: specs.map((spec) => ({
+                    label: spec.label,
+                    destructive: spec.destructive,
+                    onSelect: () => {
+                      if (spec.action === 'remove-project') void removeProjectById(id)
+                    },
+                  })),
+                })
               })
               .catch((err: unknown) => {
-                console.error('[context-menu] 弹出失败：', err instanceof Error ? err.message : err)
+                console.error('[context-menu] 取菜单项失败：', err instanceof Error ? err.message : err)
               })
           }}
+          renamingId={renamingId}
+          onRename={(id, title) => {
+            setRenamingId(null)
+            void api
+              .renameSession(id, title)
+              // 改完重新拉一次列表：标题的真相在主进程（listSessions 会把
+              // 用户起的名字覆盖上去），renderer 不自己改手里那份 ——
+              // 那样两处各推算一份，迟早分叉。走 mergeSessions 是为了尊重
+              // tombstone（见文件头那段说明）。
+              .then(async () => {
+                const list = await api.listSessions()
+                setSessions(mergeSessions(list, sessions, deletedIdsRef.current))
+              })
+              .catch((err: unknown) => {
+                console.error('[rename] 改名失败：', err instanceof Error ? err.message : err)
+              })
+          }}
+          onCancelRename={() => setRenamingId(null)}
           // 设置是另一个窗口了（macOS ⌘, 的原生做法），不再是这里的一个 state。
           // 单例、聚焦、重复打开这些都由主进程负责，这边只管喊一声。
           // .catch 不能省：这个项目已经在 Task 13/15 因为丢 .catch 栽过两次，
@@ -373,11 +439,15 @@ export function App() {
           chat={chat}
           sessionId={currentId ?? ''}
           onSend={send}
+          onCancel={cancel}
           onDecide={onDecide}
           blockedBy={blockedBy}
           onJumpToBlocking={jumpToBlocking}
         />
       </div>
+      {/* 右键菜单挂在最外层：popover 会自己进 top layer，所以挂哪儿都不会被
+          父容器的 overflow 裁掉，但放在这里更符合「它不属于某一栏」的事实。 */}
+      <ContextMenu state={menu} onClose={() => setMenu(CLOSED)} />
     </div>
   )
 }

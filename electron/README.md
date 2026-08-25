@@ -39,7 +39,7 @@ UI 会显示「哪个会话占着锁」，并提供跳转到该会话的按钮�
 
 ## 零修改是怎么做到的
 
-三个接缝，全是现有代码本来就留好的：
+四个接缝，全是现有代码本来就留好的：
 
 ### 1. `loadConfig(env)` 接受 env 参数
 
@@ -75,6 +75,24 @@ export async function connectMcpWithEnv(spec: McpServerSpec) {
 ### 3. `runAgent` 的 `onTurn` / `onComplete` 钩子
 
 直接用来推 IPC 事件和存会话（`agent-runner.ts:124-154`）。`src/agent.ts` 从一开始就预留了这两个钩子。
+
+### 4. `AgentDeps.callModel` 是注入的（取消就靠它）
+
+这个接缝一开始没被算进来，因为它看着只是"为了测试能塞假模型"。但它同时也是**取消的入口**。
+
+`runAgent` 的签名确实不收 `AbortSignal`，所以一度以为桌面版只能继承"跑起来就停不下来"。实际上 ReAct 循环每轮第一件事就是调 `callModel`（`src/agent.ts:53`），而 `runAgent` **不捕获**它的抛错——包一层"进来先查取消令牌，已取消就抛"的装饰器，循环就会在下一轮入口停下，异常一路上抛到 `agent-runner` 的 `catch`：
+
+```typescript
+// main/cancel.ts
+export function withCancel(inner: CallModel, token: CancelToken): CallModel {
+  return async (messages) => {
+    token.throwIfCancelled()
+    return inner(messages)
+  }
+}
+```
+
+装饰要套在**最外层**（`buildCallModel` 的返回值之外）：套在 `withRetry` 里面，取消会被当成可重试的失败反复退避；套在 `withFallback` 里面，取消会触发"换备用模型"，反而多打一次请求。
 
 ### 额外的能力
 
@@ -174,9 +192,9 @@ UI 移植自 [beautifului.dev](https://beautifului.dev)。token 值从该站生�
 
 - **API Key 存明文**：用 `electron-store` 持久化到 `userData`，不加密。个人本地工具，不引 keytar 以免增加跨平台打包复杂度（`main/settings-store.ts:1-2`）。
 - **官方 filesystem server 依赖 npx**：打包环境不可靠（用户机器可能没装 npx、网络可能不通）。连不上就跳过，UI 标注「文件系统工具不可用」，不阻塞启动（`main/agent-runtime.ts:56-66`）。
-- **无 agent 取消**：一个 turn 跑起来就停不下来。要停只能退出程序。这是 `src/agent.ts` 的限制（它不接受 AbortSignal），桌面版继承了这个限制。
-- **正在跑的会话不能删**：上一条的直接后果。删掉文件也没用——那一轮还会跑完，`onComplete` 里的 `sessions.save()` 会无条件把文件写回来，会话就"复活"了（侧边栏下次刷新时它又出现）。所以主进程直接拒绝，返回 `DELETE_BLOCKED`，UI 点名是哪个会话在忙（`main/ipc-handlers.ts` 的 deleteSession、`ChatWindow.tsx:12-17`）。等它跑完再删。
-- **一个悬着的审批会挡住所有会话**：串行锁不分会话，所以会话 A 的写操作等你确认时，会话 B 也发不出消息，最长 5 分钟（超时自动拒绝）。UI 会说明是谁占着锁并提供跳转按钮，但这仍然是个真实的阻塞。
+- **取消只到轮边界**：点停止之后，当前这一轮的模型请求和已经开跑的工具会跑完，到下一轮才停。长工具（shell、网络）下可能等几十秒。要真正打断正在流的请求，得把 `abortSignal` 传给 SDK 的 `streamText` / `generateText`，而 `makeCallModel` 没有这个参数——零修改下只能在 `electron/` 里复制一份带 signal 的版本，连带复制 `toSdkMessages` 那堆逐形状翻译，以后 `src/llm.ts` 改了这边不会跟着变。取舍见 `main/cancel.ts` 的文件头。
+- **工具执行中途停不下来**：同上一条的另一面。工具边界的取消要装饰注册表、返回 `{cancelled:true}` 告知模型（不能抛错，`runTool` 会把抛错吃掉包成 `{"error":...}`，模型只会当成"工具坏了"然后重试），而长工具还得自己接 signal 才能真停。
+- **一个悬着的审批会挡住所有会话**：串行锁不分会话，所以会话 A 的写操作等你确认时，会话 B 也发不出消息，最长 5 分钟（超时自动拒绝）。UI 会说明是谁占着锁并提供跳转按钮，但这仍然是个真实的阻塞。现在多了一条出路：去那个会话点停止（取消会连带把它名下悬着的审批结算掉）。
 
 ## 文件清单
 
@@ -188,6 +206,7 @@ electron/
 │   ├── agent-runtime.ts     App 级装配：embedding / 笔记索引 / MCP 子进程
 │   ├── agent-runner.ts      请求级装配：callModel 装饰链 + 串行锁
 │   ├── approval.ts          审批闸口：注册表装饰器 + 超时
+│   ├── cancel.ts            取消令牌：装饰注入的 callModel，在轮边界停下
 │   ├── call-model.ts        buildCallModel：retry / cache / fallback 包装
 │   ├── config-env.ts        设置 → env 映射（不改 src/config.ts）
 │   ├── sessions.ts          会话列表：扫描 .sessions/*.json（不改 src/）

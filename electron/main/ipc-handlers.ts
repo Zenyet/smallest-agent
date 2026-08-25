@@ -1,7 +1,7 @@
 // 唯一允许 import electron 的两个文件之一（另一个是 index.ts）。
 // 这里只做「接线」：把纯模块拼起来挂到 ipcMain 上，不放业务逻辑 ——
 // 业务逻辑都在能被 vitest 直接测的纯模块里。
-import { dialog, ipcMain, Menu, type BrowserWindow } from 'electron'
+import { dialog, ipcMain, type BrowserWindow } from 'electron'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
@@ -13,6 +13,7 @@ import { menuFor, type ContextTarget } from './context-menu'
 import { createAgentRunner, makeDefaultRunnerDeps, type AgentEmitter } from './agent-runner'
 import { listSessions, deleteSession, newSessionId } from './sessions'
 import { getProjectsState, setProjectsState } from './projects-store'
+import { forgetSessionTitle, getSessionTitles, setSessionTitle } from './session-titles-store'
 import {
   addProject,
   assignSession,
@@ -61,10 +62,26 @@ export function setupIpcHandlers(
     cacheHit: send(CH.cacheHit),
     error: send(CH.error),
     approvalRequest: send(CH.approvalRequest),
+    cancelled: send(CH.cancelled),
   }
 
   const readConfig = () => loadConfig(buildEnv(process.env, getSettings(), paths))
   const runner = createAgentRunner(makeDefaultRunnerDeps(runtime.registry, emit, readConfig, gate))
+
+  // 停止正在跑的那一轮。返回「有没有受理」——目标没在跑就是 false，不抛错。
+  // 受理不等于已停：取消是轮边界的，真停下来时会推 cancelled 事件。
+  ipcMain.handle(CH.cancelMessage, (_e, sessionId: string) => {
+    const accepted = runner.cancel(sessionId)
+    // 卡在审批上的那一轮，光置取消标志没用：它停在 gate 里等一个决定，
+    // 根本走不到下一个轮边界去看那个标志，于是要悬到 5 分钟超时才结算
+    // （approval.ts 的 DEFAULT_TIMEOUT_MS）—— 用户点了停止却什么都不发生。
+    //
+    // 所以把它名下悬着的审批一并结算掉（fail-closed 成拒绝）。工具拿到
+    // {denied:true} 返回、那一轮推进到下一个轮边界，就看见取消了。
+    // 对没有悬着审批的会话是空操作，幂等。
+    if (accepted) gate.cancelSession(sessionId)
+    return accepted
+  })
 
   ipcMain.handle(CH.sendMessage, (_e, sessionId: string, message: string) => {
     // 重启过程中拒绝新工作：防止 restartApp 的守卫检查通过后、app.quit() 的
@@ -91,9 +108,19 @@ export function setupIpcHandlers(
   // 会话列表带上项目归属：listSessions 只认磁盘上的会话文件（它不知道项目这回事），
   // 映射活在 electron-store 里，在这里合成一次，让「某个会话属于哪个项目」
   // 只有一个真相来源，而不是让 renderer 自己拿两份数据去对。
-  ipcMain.handle(CH.listSessions, async () =>
-    decorateSessions(await listSessions(paths.sessionsDir), getProjectsState()),
-  )
+  // 标题同理：listSessions 给的是从第一条消息推出来的默认标题，用户改过的名字
+  // 存在 electron-store 里（session-titles.ts）。在这里覆盖一次，理由和项目
+  // 映射一样 —— 让「这个会话叫什么」只有一个真相来源。
+  ipcMain.handle(CH.listSessions, async () => {
+    const metas = decorateSessions(await listSessions(paths.sessionsDir), getProjectsState())
+    const titles = getSessionTitles()
+    return metas.map((m) => (titles[m.id] ? { ...m, title: titles[m.id] } : m))
+  })
+
+  ipcMain.handle(CH.getSessionTitles, () => getSessionTitles())
+
+  // 改名。空字符串 = 恢复自动推导的标题（见 session-titles.ts 的 setSessionTitle）。
+  ipcMain.handle(CH.renameSession, (_e, id: string, title: string) => setSessionTitle(id, title))
 
   // --- 项目分组 ---
   // 每个写操作都返回写完之后的完整状态，并广播同一份出去：renderer 不自己推算
@@ -131,32 +158,15 @@ export function setupIpcHandlers(
 
   ipcMain.handle(CH.removeProject, (_e, id: string) => commitProjects(removeProject(getProjectsState(), id)))
 
-  // 右键菜单。菜单内容来自纯模块 menuFor（可单测），这里只负责弹和等结果。
-  // popup 的回调式 API 包成 Promise：调用方（renderer 的右键处理）就在等这一个答案，
-  // 用户按 Esc 关掉菜单时 popup 直接结束、谁都没点，那就 resolve(null)。
-  ipcMain.handle(CH.showContextMenu, async (_e, target: ContextTarget) => {
-    const specs = menuFor(target)
-    return await new Promise<string | null>((resolve) => {
-      let picked: string | null = null
-      const menu = Menu.buildFromTemplate(
-        specs.map((spec) => ({
-          label: spec.label,
-          // macOS 会把 role 或 sublabel 之外的破坏性语义画成红色的能力有限，
-          // Electron 没有跨平台的 destructive 标记，所以这里不假装有 ——
-          // 文案本身（「删除」「移除」）已经把后果说清楚了。
-          click: () => {
-            picked = spec.action
-          },
-        })),
-      )
-      // closed 一定会触发（选了项也会），所以在它里面 resolve 能同时覆盖
-      // 「选了」和「按 Esc 取消」两种收尾，不需要两处各写一遍。
-      menu.popup({
-        window: win,
-        callback: () => resolve(picked),
-      })
-    })
-  })
+  // 右键菜单。菜单内容来自纯模块 menuFor（可单测），这里只把它交给 renderer。
+  //
+  // 原来这里是 Menu.popup()：主进程弹原生菜单、等用户选、把动作回传。现在改成
+  // renderer 自绘（components/ContextMenu.tsx），原因是原生菜单的外观由 AppKit
+  // 画、CSS 碰不到，跟这套设计 token 对不上 —— 见 context-menu.ts 的文件头。
+  //
+  // 保留这个 IPC 而不是让 renderer 直接 import menuFor：菜单里有哪几项是产品
+  // 决定，留在主进程这一侧，将来要按平台或设置调整时只改一处。
+  ipcMain.handle(CH.showContextMenu, (_e, target: ContextTarget) => menuFor(target))
 
   ipcMain.handle(CH.assignSession, (_e, sessionId: string, projectId: string | null) =>
     commitProjects(assignSession(getProjectsState(), sessionId, projectId)),
@@ -190,18 +200,32 @@ export function setupIpcHandlers(
     return id
   })
 
-  ipcMain.handle(CH.deleteSession, (_e, id: string) => {
-    // 正在被 agent 处理的会话不能删：src/ 冻结，runAgent 没有真正的取消机制，
-    // 硬删文件之后 onComplete 的 sessions.save() 还是会照常写回去（src/memory/store.ts
-    // 的 save() 不检查会话是否"应该还存在"），下一次任何会话的 onMessageComplete
-    // 触发 listSessions() 刷新，这个"删掉的"会话就会带着新写的文件重新出现在侧栏——
-    // 删除等于白删。与其伪造一个假删除，不如直接拒绝并说清楚理由，等它跑完再删。
+  ipcMain.handle(CH.deleteSession, async (_e, id: string) => {
+    // 正在跑的会话：先停掉再删，不再拒绝用户。
+    //
+    // 原来这里是抛错（DELETE_BLOCKED），理由是「src/ 冻结，runAgent 没有真正的
+    // 取消机制，硬删文件之后 onComplete 的 sessions.save() 还是会照常写回去
+    // （src/memory/store.ts 的 save() 不检查会话是否'应该还存在'），于是那个
+    // '删掉的'会话会带着新写的文件重新出现在侧栏」。
+    //
+    // 现在有取消了（main/cancel.ts）。但**顺序不能反**：取消路径上同样会
+    // sessions.save()，先删文件的话存盘后落地、会话照样复活。所以要
+    // 取消 → 等它彻底停下（含那次存盘）→ 才删。
+    //
+    // rs 侧撞过同一个坑，用 200ms 定时器兜（ui/src/chat.rs 的注释说明了
+    // 为什么不做严格的完成信号：要给 bridge 加一条反向通路，为一个删除时序
+    // 不值）。这边不用猜时间 —— runner 就在主进程内，settled() 给的是
+    // 那一轮真正的 promise。
     if (runner.runningSessionId() === id) {
-      throw new Error('该会话正在处理中，暂时无法删除。请等待它跑完（如果卡在审批上，去把那个操作拒绝掉），再重试删除。')
+      runner.cancel(id)
+      // 卡在审批上的话，那一轮停在 gate 里等决定，settled() 会一直悬着。
+      // 先把它名下的审批取消掉（fail-closed 结算成拒绝），那一轮才能推进到
+      // 下一个轮边界看见取消标志。
+      gate.cancelSession(id)
+      await runner.settled()
     }
     // 会话被删了，它名下悬着的审批请求也失去意义——不取消的话会占着串行锁直到超时。
-    // （到这里时按上面的检查，这个 sessionId 不可能是正在运行的那个，
-    // pending() 里也不会有它的条目，这行调用是防御性的，保持幂等无害。）
+    // 上面那个分支里已经调过一次，这里对没在跑的会话兜底；幂等，重复调用无害。
     gate.cancelSession(id)
     // 会话删了，它的项目映射也是垃圾了。不清的话会在 electron-store 里越攒越多，
     // 而且将来某个新会话万一拿到同样的 id（进程内的计数器保证不会，但跨重启
@@ -213,6 +237,10 @@ export function setupIpcHandlers(
     const before = getProjectsState()
     const after = forgetSession(before, id)
     if (after !== before) commitProjects(after)
+    // 标题覆盖同理：会话没了它就是垃圾数据。理由见 session-titles.ts 的
+    // forgetSessionTitle —— 不清的话会越攒越多，而且 id 万一重合会让新会话
+    // 莫名带上一个旧名字。
+    forgetSessionTitle(id)
     return deleteSession(paths.sessionsDir, id)
   })
 

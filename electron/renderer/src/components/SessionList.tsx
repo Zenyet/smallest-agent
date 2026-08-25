@@ -21,6 +21,9 @@ export function SessionList({
   onSelectProject,
   onSessionContextMenu,
   onProjectContextMenu,
+  renamingId,
+  onRename,
+  onCancelRename,
 }: {
   /** 已经按项目分好组的会话（分组逻辑在 main/projects.ts 的 groupSessions 里，可单测） */
   groups: SessionGroup[]
@@ -33,10 +36,17 @@ export function SessionList({
   onAddProject: () => void
   onToggleCollapsed: (id: string) => void
   onSelectProject: (id: string) => void
-  /** 右键会话：由 App 转给主进程弹原生菜单，选了「删除」再回调到删除逻辑。
-   *  组件本身不知道菜单里有什么，只负责报告「哪一项被右键了」。 */
-  onSessionContextMenu: (id: string, title: string) => void
-  onProjectContextMenu: (id: string, name: string) => void
+  /** 右键会话：由 App 拿菜单项、自绘浮层（components/ContextMenu.tsx）。
+   *  组件本身不知道菜单里有什么，只负责报告「哪一项被右键了 + 光标在哪」。
+   *  光标坐标要从这里给：菜单要钉在右键那一下的位置，而 App 收不到那个事件。 */
+  onSessionContextMenu: (id: string, title: string, at: { x: number; y: number }) => void
+  onProjectContextMenu: (id: string, name: string, at: { x: number; y: number }) => void
+  /** 正在改名的会话 id。这一行的标题就地换成输入框（gpui 侧 sidebar.rs 同样做法）。 */
+  renamingId: string | null
+  /** 敲回车提交。空字符串 = 恢复自动推导的标题。 */
+  onRename: (id: string, title: string) => void
+  /** Esc 或失焦放弃 */
+  onCancelRename: () => void
 }) {
   return (
     <aside className="sidebar flex w-56 flex-none flex-col gap-1.5 border-r border-line bg-canvas p-2">
@@ -129,7 +139,7 @@ export function SessionList({
                   // 未分组那一组不是用户建的，没有「移除」可做，就不弹菜单
                   if (!isProject) return
                   e.preventDefault()
-                  onProjectContextMenu(group.id, group.name)
+                  onProjectContextMenu(group.id, group.name, { x: e.clientX, y: e.clientY })
                 }}
                 className={`project__row group flex h-7 cursor-pointer items-center gap-1.5 rounded-control px-1.5 text-[12.5px] transition-[color,background-color] duration-150 ${
                   isCurrentProject
@@ -153,14 +163,41 @@ export function SessionList({
                   折叠时整个 <ul> 不渲染，而不是 display:none —— 长列表下这也省掉
                   几百个不可见节点的渲染开销。 */}
               {!group.collapsed && group.sessions.length > 0 && (
-                <ul className="m-0 ml-[13px] flex list-none flex-col gap-px border-l border-line py-px pl-1.5">
+                <ul className="m-0 flex list-none flex-col gap-px border-l border-line py-px pl-1.5">
                   {group.sessions.map((s) => {
                     const isActive = s.id === currentId
+                    // 改名中：整行换成输入框，不显示标题。
+                    // 就地编辑而不是弹对话框 —— 改名是个轻动作，弹窗要用户
+                    // 先看清标题再点确定，反而多两步（gpui 侧记的是同一条理由）。
+                    if (s.id === renamingId) {
+                      return (
+                        <li
+                          key={s.id}
+                          className="session flex h-7 items-center rounded-control px-2 text-[12.5px]"
+                        >
+                          <input
+                            autoFocus
+                            defaultValue={s.title}
+                            maxLength={60}
+                            // 进来就全选：改名多半是整个重写，而不是在原名里插字
+                            onFocus={(e) => e.currentTarget.select()}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') onRename(s.id, e.currentTarget.value)
+                              if (e.key === 'Escape') onCancelRename()
+                            }}
+                            // 失焦按放弃而不是提交：点到别处通常是「算了」，
+                            // 静默改掉名字会让人不确定自己刚干了什么
+                            onBlur={onCancelRename}
+                            className="w-full rounded-chip border border-line-strong bg-field px-1.5 py-0.5 text-[12.5px] text-ink outline-none focus:border-accent"
+                          />
+                        </li>
+                      )
+                    }
                     return (
                       // session--active 保留作测试锚点
                       // 删除入口是右键菜单，不再是行尾那个 hover 才出现的 ✕。
                       // 那个 ✕ 有两个问题：它占着每一行的右端（哪怕透明也占位），
-                      // 而且悬停才出现意味着用户得先发现它存在。原生右键菜单是
+                      // 而且悬停才出现意味着用户得先发现它存在。右键菜单是
                       // 桌面应用里「对这一项做点什么」的既定手势，不用教。
                       <li
                         key={s.id}
@@ -170,7 +207,7 @@ export function SessionList({
                         onClick={() => onSelect(s.id)}
                         onContextMenu={(e) => {
                           e.preventDefault()
-                          onSessionContextMenu(s.id, s.title)
+                          onSessionContextMenu(s.id, s.title, { x: e.clientX, y: e.clientY })
                         }}
                       >
                         <span className="flex-1 truncate">{s.title}</span>
@@ -183,7 +220,7 @@ export function SessionList({
               {/* 空项目：刚添加完目录、还没在里面开对话时，不给一行提示的话
                   那次「添加项目」看起来就像什么都没发生。 */}
               {!group.collapsed && group.sessions.length === 0 && (
-                <p className="m-0 ml-[13px] border-l border-line py-1 pl-3 text-[11.5px] text-ink-3">
+                <p className="m-0 border-l border-line py-1 pl-3 text-[11.5px] text-ink-3">
                   还没有对话
                 </p>
               )}

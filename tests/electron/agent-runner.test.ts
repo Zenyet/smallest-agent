@@ -20,6 +20,7 @@ function makeEmitter() {
       cacheHit: record('cacheHit'),
       error: record('error'),
       approvalRequest: record('approvalRequest'),
+      cancelled: record('cancelled'),
     },
   }
 }
@@ -220,5 +221,205 @@ describe('createAgentRunner', () => {
       sessionId: 's1',
       toolName: 'write_file',
     })
+  })
+})
+
+// 取消（轮边界）。机制见 electron/main/cancel.ts 的文件头：callModel 是
+// 注入的，包一层就能让 ReAct 循环在下一轮入口停下，src/ 一行不改。
+describe('createAgentRunner 的取消', () => {
+  // 模拟一个「会转好几轮」的 agent：每轮都调 callModel，所以取消能在轮边界生效。
+  // 真实的 runAgent 就是这个形状（src/agent.ts:51-81 的 for 循环）。
+  function multiTurnRunAgent(turns = 5): RunnerDeps['runAgent'] {
+    return async (input, agentDeps) => {
+      for (let t = 1; t <= turns; t++) {
+        // runAgent 不捕获 callModel 的抛错 —— 这是取消能生效的前提
+        await agentDeps.callModel([{ role: 'user', content: input }])
+      }
+      return '答案'
+    }
+  }
+
+  it('取消后发 cancelled 事件，不发 error', async () => {
+    const { events, emit } = makeEmitter()
+    const runner = createAgentRunner(
+      makeDeps({
+        emit,
+        runAgent: async (input, agentDeps) => {
+          // 第一轮正常，然后外部取消，第二轮入口就该抛
+          await agentDeps.callModel([{ role: 'user', content: input }])
+          runner.cancel('s1')
+          await agentDeps.callModel([{ role: 'user', content: input }])
+          return '不该走到这里'
+        },
+      }),
+    )
+    await runner.run('s1', '很长的活')
+
+    expect(events.filter((e) => e.type === 'cancelled')).toEqual([
+      { type: 'cancelled', payload: { sessionId: 's1' } },
+    ])
+    // 关键：取消不是错误。走 error 通道会让前端渲染成红色报错，
+    // 用户以为自己的操作出了问题
+    expect(events.some((e) => e.type === 'error')).toBe(false)
+    // 也不该发 complete —— 那一轮没有答案
+    expect(events.some((e) => e.type === 'complete')).toBe(false)
+  })
+
+  it('取消路径上存盘（保住用户这次的提问）', async () => {
+    const saved: { id: string; messages: Message[] }[] = []
+    const runner = createAgentRunner(
+      makeDeps({
+        makeSessionStore: () => ({
+          load: async () => [{ role: 'user', content: '上一轮' } as Message],
+          save: async (id, messages) => {
+            saved.push({ id, messages })
+          },
+        }),
+        runAgent: async (input, agentDeps) => {
+          runner.cancel('s1')
+          await agentDeps.callModel([{ role: 'user', content: input }])
+          return '不该走到这里'
+        },
+      }),
+    )
+    await runner.run('s1', '这次的提问')
+
+    expect(saved).toHaveLength(1)
+    expect(saved[0].messages).toEqual([
+      { role: 'user', content: '上一轮' },
+      { role: 'user', content: '这次的提问' },
+    ])
+  })
+
+  it('真错误不被当成取消', async () => {
+    const { events, emit } = makeEmitter()
+    const runner = createAgentRunner(
+      makeDeps({
+        emit,
+        runAgent: async () => {
+          throw new Error('fetch failed')
+        },
+      }),
+    )
+    await runner.run('s1', '天气')
+
+    expect(events.some((e) => e.type === 'cancelled')).toBe(false)
+    expect(events.find((e) => e.type === 'error')?.payload).toMatchObject({
+      sessionId: 's1',
+      code: 'MODEL_ERROR',
+    })
+  })
+
+  it('取消后释放串行锁', async () => {
+    const runner = createAgentRunner(
+      makeDeps({
+        runAgent: async (input, agentDeps) => {
+          runner.cancel('s1')
+          await agentDeps.callModel([{ role: 'user', content: input }])
+          return '不该走到这里'
+        },
+      }),
+    )
+    await runner.run('s1', '活')
+    expect(runner.isBusy()).toBe(false)
+    expect(runner.runningSessionId()).toBeNull()
+  })
+
+  it('取消没在跑的会话返回 false，不抛', () => {
+    const runner = createAgentRunner(makeDeps())
+    expect(runner.cancel('s1')).toBe(false)
+  })
+
+  // 用户在 A 会话点停止，不该把 B 会话正在跑的那轮停掉
+  it('只取消正在跑的那个会话', async () => {
+    const { events, emit } = makeEmitter()
+    const accepted: boolean[] = []
+    const runner = createAgentRunner(
+      makeDeps({
+        emit,
+        runAgent: async (input, agentDeps) => {
+          accepted.push(runner.cancel('别的会话'))
+          await agentDeps.callModel([{ role: 'user', content: input }])
+          return '答案'
+        },
+      }),
+    )
+    await runner.run('s1', '活')
+
+    expect(accepted).toEqual([false])
+    expect(events.some((e) => e.type === 'cancelled')).toBe(false)
+    expect(events.some((e) => e.type === 'complete')).toBe(true)
+  })
+
+  it('取消是一次性的：下一轮不受上一轮影响', async () => {
+    const { events, emit } = makeEmitter()
+    let firstRun = true
+    const runner = createAgentRunner(
+      makeDeps({
+        emit,
+        runAgent: async (input, agentDeps) => {
+          if (firstRun) {
+            firstRun = false
+            runner.cancel('s1')
+          }
+          await agentDeps.callModel([{ role: 'user', content: input }])
+          return '答案'
+        },
+      }),
+    )
+    await runner.run('s1', '第一次')
+    await runner.run('s1', '第二次')
+
+    // 第一次被取消，第二次必须正常跑完 —— 令牌复用会让取消泄漏到下一轮
+    expect(events.filter((e) => e.type === 'cancelled')).toHaveLength(1)
+    expect(events.filter((e) => e.type === 'complete')).toHaveLength(1)
+  })
+
+  it('settled() 等到那一轮真的结束', async () => {
+    let finished = false
+    const runner = createAgentRunner(
+      makeDeps({
+        runAgent: multiTurnRunAgent(3),
+        buildCallModel: () => async () => {
+          await new Promise((r) => setTimeout(r, 1))
+          return { text: '', toolCalls: [] }
+        },
+      }),
+    )
+    const run = runner.run('s1', '活').then(() => {
+      finished = true
+    })
+    // settled() 拿到的是同一个 promise，await 它之后那一轮必须已经收尾
+    await runner.settled()
+    await run
+    expect(finished).toBe(true)
+    expect(runner.isBusy()).toBe(false)
+  })
+
+  it('没在跑时 settled() 立刻返回', async () => {
+    const runner = createAgentRunner(makeDeps())
+    await expect(runner.settled()).resolves.toBeUndefined()
+  })
+
+  it('多轮 agent 在下一轮入口停下，不跑完所有轮', async () => {
+    const calls: number[] = []
+    const runner = createAgentRunner(
+      makeDeps({
+        runAgent: async (input, agentDeps) => {
+          for (let t = 1; t <= 5; t++) {
+            calls.push(t)
+            if (t === 2) runner.cancel('s1')
+            await agentDeps.callModel([{ role: 'user', content: input }])
+          }
+          return '答案'
+        },
+      }),
+    )
+    await runner.run('s1', '活')
+
+    // 第 2 轮里先调了 cancel，紧接着那次 callModel 就被拦下 —— 所以停在 2，
+    // 剩下的 3/4/5 轮一次都没进。这也说明取消是「下一次 callModel」生效，
+    // 而不是「下一次循环迭代」
+    expect(calls).toEqual([1, 2])
   })
 })

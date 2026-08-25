@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CH } from '../shared/channels'
-import type { ContextTarget } from './context-menu'
+import type { ContextTarget, MenuItemSpec } from './context-menu'
 import type {
   ApprovalDecision,
   ApprovalRequestEvent,
@@ -17,6 +17,7 @@ import type {
   ToolCallEvent,
   VerdictEvent,
   CacheHitEvent,
+  CancelledEvent,
   ProviderDetection,
   ProviderSecret,
 } from '../shared/channels'
@@ -32,6 +33,9 @@ const api = {
   ping: (): Promise<'pong'> => ipcRenderer.invoke(CH.ping),
   sendMessage: (sessionId: string, message: string): Promise<void> =>
     ipcRenderer.invoke(CH.sendMessage, sessionId, message),
+  // 返回「有没有受理」，不代表已经停了 —— 真停下来时会收到 onCancelled。
+  cancelMessage: (sessionId: string): Promise<boolean> =>
+    ipcRenderer.invoke(CH.cancelMessage, sessionId),
   getSettings: (): Promise<DesktopSettings> => ipcRenderer.invoke(CH.getSettings),
   saveSettings: (patch: DesktopSettings): Promise<DesktopSettings> =>
     ipcRenderer.invoke(CH.saveSettings, patch),
@@ -56,8 +60,15 @@ const api = {
     ipcRenderer.invoke(CH.addProject),
   removeProject: (id: string): Promise<ProjectsState> => ipcRenderer.invoke(CH.removeProject, id),
   /** 弹原生右键菜单，返回用户选的动作（没选返回 null） */
-  showContextMenu: (target: ContextTarget): Promise<string | null> =>
+  // 返回菜单该有哪几项，由 renderer 自己画（components/ContextMenu.tsx）。
+  // 原来这里返回的是「用户选了哪个动作」，因为菜单是主进程弹的原生菜单。
+  showContextMenu: (target: ContextTarget): Promise<MenuItemSpec[]> =>
     ipcRenderer.invoke(CH.showContextMenu, target),
+  getSessionTitles: (): Promise<Record<string, string>> =>
+    ipcRenderer.invoke(CH.getSessionTitles),
+  // 空标题 = 恢复自动推导的名字。返回写完之后的完整表。
+  renameSession: (id: string, title: string): Promise<Record<string, string>> =>
+    ipcRenderer.invoke(CH.renameSession, id, title),
   assignSession: (sessionId: string, projectId: string | null): Promise<ProjectsState> =>
     ipcRenderer.invoke(CH.assignSession, sessionId, projectId),
   toggleProjectCollapsed: (id: string): Promise<ProjectsState> =>
@@ -82,6 +93,8 @@ const api = {
   onVerdict: (cb: (d: VerdictEvent) => void) => subscribe(CH.verdict, cb),
   onCacheHit: (cb: (d: CacheHitEvent) => void) => subscribe(CH.cacheHit, cb),
   onError: (cb: (d: ErrorEvent) => void) => subscribe(CH.error, cb),
+  // 那一轮真的停了。不走 onError —— 用户主动停止不是错误。
+  onCancelled: (cb: (d: CancelledEvent) => void) => subscribe(CH.cancelled, cb),
   onRuntimeStatus: (cb: (d: RuntimeStatusEvent) => void) => subscribe(CH.runtimeStatus, cb),
   onApprovalRequest: (cb: (d: ApprovalRequestEvent) => void) => subscribe(CH.approvalRequest, cb),
   // 主进程广播的两条：设置和项目状态。两个窗口之后单靠 invoke 的返回值不够——
