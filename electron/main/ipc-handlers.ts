@@ -5,14 +5,30 @@ import { dialog, ipcMain, type BrowserWindow } from 'electron'
 import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
-import { CH } from '../shared/channels'
+import { CH, type ProvidersView } from '../shared/channels'
 import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
 import { validateSettingsPatch } from './settings-validate'
 import { menuFor, type ContextTarget } from './context-menu'
 import { createAgentRunner, makeDefaultRunnerDeps, type AgentEmitter } from './agent-runner'
+import { truncateAtNthUser } from './truncate'
 import { listSessions, deleteSession, newSessionId } from './sessions'
 import { getProjectsState, setProjectsState } from './projects-store'
+import { getProvidersState, setProvidersState, providersStorePath } from './providers-store'
+import {
+  BUILTIN_ID,
+  assignPermission,
+  assignProvider,
+  assignModel,
+  forgetSession as forgetProviderSession,
+  modelFor,
+  permissionFor,
+  providerFor,
+  providerOptions,
+  toPermissionMode,
+} from './providers'
+import { createProviderRegistry } from './provider/registry'
+import { randomUUID } from 'node:crypto'
 import { forgetSessionTitle, getSessionTitles, setSessionTitle } from './session-titles-store'
 import {
   addProject,
@@ -27,6 +43,7 @@ import type { ApprovalGate } from './approval'
 import { loadConfig } from '../../src/config'
 import { createJsonSessionStore } from '../../src/memory/store'
 import type { AgentRuntime } from './agent-runtime'
+import type { FsToolsPool } from './fs-tools'
 import type { UserPaths } from './config-env'
 import {
   detectClaudeConfig,
@@ -48,7 +65,8 @@ export function setupIpcHandlers(
   gate: ApprovalGate,
   isRestarting: () => boolean,
   broadcast: Broadcast,
-): { runningSessionId: () => string | null } {
+  fsPool: FsToolsPool,
+): { runningSessionId: () => string | null; disposeProviders: () => void } {
   const send = (channel: string) => (payload: unknown) => {
     // 窗口可能已被关闭，发送前检查，避免 "Object has been destroyed"
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
@@ -66,7 +84,41 @@ export function setupIpcHandlers(
   }
 
   const readConfig = () => loadConfig(buildEnv(process.env, getSettings(), paths))
-  const runner = createAgentRunner(makeDefaultRunnerDeps(runtime.registry, emit, readConfig, gate))
+
+  // 外部 CLI（ACP）的实例缓存。审批复用现有的闸口 —— ACP 的权限请求和内置
+  // agent 的写工具审批是同一件事「有后果的动作执行前必须显式确认」，
+  // 所以它们共用一张审批卡、一条 IPC 通路。
+  const providerRegistry = createProviderRegistry({
+    requestApproval: (event) => {
+      // 先把卡片推给 renderer，再等用户点。两步不能合并 ——
+      // gate.requestApproval 只负责「等一个决定」，推送是 emit 的事
+      emit.approvalRequest(event)
+      return gate.requestApproval(event)
+    },
+    newRequestId: () => randomUUID(),
+  })
+
+  /** 这个会话绑的项目目录。外部 CLI 的 cwd 用它 —— 见设计文档「工作目录」。 */
+  const cwdFor = (sessionId: string): string | undefined => {
+    const projects = getProjectsState()
+    const projectId = projects.sessionProject[sessionId]
+    if (!projectId) return undefined
+    return projects.projects.find((p) => p.id === projectId)?.dir
+  }
+
+  const runner = createAgentRunner({
+    ...makeDefaultRunnerDeps(runtime.registry, emit, readConfig, gate),
+    // 这一轮由谁跑。内置返回 null，让 runner 自己装配（它无状态，每轮新建）。
+    resolveProvider: (sessionId) => {
+      const state = getProvidersState()
+      const providerId = providerFor(state, sessionId)
+      if (providerId === BUILTIN_ID) return null
+      return providerRegistry.get(state, providerId, modelFor(state, sessionId))
+    },
+    resolveCwd: cwdFor,
+    resolvePermission: (sessionId) => permissionFor(getProvidersState(), sessionId),
+    fsPool,
+  })
 
   // 停止正在跑的那一轮。返回「有没有受理」——目标没在跑就是 false，不抛错。
   // 受理不等于已停：取消是轮边界的，真停下来时会推 cancelled 事件。
@@ -241,10 +293,73 @@ export function setupIpcHandlers(
     // forgetSessionTitle —— 不清的话会越攒越多，而且 id 万一重合会让新会话
     // 莫名带上一个旧名字。
     forgetSessionTitle(id)
+    // provider / 模型 / 权限绑定同理 —— 会话没了它们就是垃圾数据。
+    // 引用比较跳过「本来就没绑过」的常见情况，不必每次删会话都写一次盘
+    const beforeProviders = getProvidersState()
+    const afterProviders = forgetProviderSession(beforeProviders, id)
+    if (afterProviders !== beforeProviders) setProvidersState(afterProviders)
     return deleteSession(paths.sessionsDir, id)
   })
 
   ipcMain.handle(CH.loadSession, (_e, id: string) => createJsonSessionStore(paths.sessionsDir).load(id))
+
+  // 编辑重发的第一步：砍历史。renderer 随后走正常的 sendMessage 路径重新提问。
+  //
+  // 拒绝在跑的时候砍：那一轮还在往同一个文件里写（onComplete 里的
+  // sessions.save 是整体覆写），砍完立刻被它写回来 —— 和删除正在跑的会话
+  // 撞的是同一个坑（见上面 deleteSession 那段）。renderer 侧已经用
+  // canEdit 挡了编辑入口，这里是主进程侧的兜底：那个标志是 UI 状态，
+  // 而「谁占着串行锁」的真相在 runner 手里。
+  ipcMain.handle(CH.truncateSession, async (_e, id: string, nthUser: number) => {
+    const store = createJsonSessionStore(paths.sessionsDir)
+    if (runner.runningSessionId() === id) return store.load(id)
+    const truncated = truncateAtNthUser(await store.load(id), nthUser)
+    await store.save(id, truncated)
+    return truncated
+  })
+
+  // --- Agent 模式 ---
+  //
+  // 每个写操作返回写完之后的完整视图并广播同一份出去：renderer 不自己推算
+  // 下一个状态（和项目分组同一条理由 —— 两处各推算一份迟早分叉）。
+  const providersView = (sessionId: string): ProvidersView => {
+    const state = getProvidersState()
+    const current = providerFor(state, sessionId)
+    const entry = state.external.find((e) => e.id === current)
+    return {
+      options: providerOptions(state),
+      current,
+      models: (entry?.models ?? []).map((m) => ({ id: m.id, name: m.name })),
+      currentModel: modelFor(state, sessionId),
+      permission: permissionFor(state, sessionId),
+      configPath: providersStorePath(),
+      projectPath: cwdFor(sessionId),
+    }
+  }
+
+  const commitProviders = (next: ReturnType<typeof getProvidersState>, sessionId: string) => {
+    setProvidersState(next)
+    const view = providersView(sessionId)
+    broadcast(CH.providersChanged, view)
+    return view
+  }
+
+  ipcMain.handle(CH.getProviders, (_e, sessionId: string) => providersView(sessionId))
+
+  ipcMain.handle(CH.setSessionProvider, (_e, sessionId: string, providerId: string) =>
+    commitProviders(assignProvider(getProvidersState(), sessionId, providerId), sessionId),
+  )
+
+  ipcMain.handle(CH.setSessionModel, (_e, sessionId: string, modelId: string) =>
+    commitProviders(assignModel(getProvidersState(), sessionId, modelId), sessionId),
+  )
+
+  ipcMain.handle(CH.setSessionPermission, (_e, sessionId: string, mode: string) =>
+    commitProviders(
+      assignPermission(getProvidersState(), sessionId, toPermissionMode(mode)),
+      sessionId,
+    ),
+  )
 
   ipcMain.handle(CH.approvalResponse, (_e, requestId: string, decision: 'allow' | 'deny') =>
     gate.resolve(requestId, decision),
@@ -252,7 +367,15 @@ export function setupIpcHandlers(
 
   setupProviderHandlers()
 
-  return { runningSessionId: () => runner.runningSessionId() }
+  return {
+    runningSessionId: () => runner.runningSessionId(),
+    // app 退出时要收掉那些 npx 子进程 —— 不收的话它们会变成孤儿进程留在
+    // 系统里（stdio 的 stderr 是 inherit，父进程没了它们也不会自己退）
+    disposeProviders: () => {
+      providerRegistry.disposeAll()
+      fsPool.disposeAll()
+    },
+  }
 }
 
 // Provider 探测/导入单独成一个函数：启动失败路径（index.ts 的 catch）也要注册它们。

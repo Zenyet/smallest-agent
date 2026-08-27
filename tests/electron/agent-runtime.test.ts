@@ -40,25 +40,12 @@ describe('createRuntime', () => {
 
   it('合并本地 search_notes 和两个 MCP server 的工具', async () => {
     const rt = await createRuntime(config, specs, () => {}, makeDeps())
-    expect(Object.keys(rt.registry).sort()).toEqual(['get_weather', 'read_file', 'search_notes'])
-  })
-
-  it('fs server 连不上时降级：不抛错，其余工具照常可用', async () => {
-    const deps = makeDeps({
-      loadMcpToolsFromServers: async (servers: { command: string }[]) => {
-        if (servers[0].command === 'fs') throw new Error('npx not found')
-        return { tools: { get_weather: fakeTool('get_weather') }, close: async () => {} }
-      },
-    })
-    const rt = await createRuntime(config, specs, () => {}, deps)
-    expect(rt.fsToolsAvailable).toBe(false)
+    // fs server 不再在这里了（按项目目录懒建），所以只有自建工具 + 笔记检索
     expect(Object.keys(rt.registry).sort()).toEqual(['get_weather', 'search_notes'])
   })
 
-  it('fs server 正常时标记为可用', async () => {
-    const rt = await createRuntime(config, specs, () => {}, makeDeps())
-    expect(rt.fsToolsAvailable).toBe(true)
-  })
+  // fs server 连不上的降级测试**移到 fs-tools.test.ts** 了 ——
+  // createRuntime 不再碰 fs server（按项目目录建，见 fs-tools.ts）
 
   it('自建 server 连不上是致命错误：抛出并播报 failed', async () => {
     const phases: RuntimeStatusEvent['phase'][] = []
@@ -86,6 +73,7 @@ describe('createRuntime', () => {
     })
     const rt = await createRuntime(config, specs, () => {}, deps)
     await rt.close()
-    expect(closed.sort()).toEqual(['fs', 'own'])
+    // fs server 不再自动加入（只在有 cwd 时才加），所以只有用户配的 own
+    expect(closed).toEqual(['own'])
   })
 })

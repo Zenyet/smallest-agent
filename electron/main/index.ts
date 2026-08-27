@@ -5,7 +5,8 @@ import { fileURLToPath } from 'node:url'
 import { CH } from '../shared/channels'
 import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
-import { ownServerSpec, fsServerSpec } from './mcp-paths'
+import { ownServerSpec } from './mcp-paths'
+import { createFsToolsPool } from './fs-tools'
 import { createRuntime, type AgentRuntime } from './agent-runtime'
 import { setupIpcHandlers, setupProviderHandlers } from './ipc-handlers'
 import { createApprovalGate } from './approval'
@@ -98,65 +99,6 @@ function createWindow(): BrowserWindow {
   return win
 }
 
-// 设置窗口是独立 BrowserWindow，不是主窗口里的浮层 —— macOS 上 ⌘, 打开一个
-// 独立的偏好设置窗口是系统惯例，浮层是网页味。
-//
-// 单例：模块级变量记住它。用 isDestroyed() 判断而不是靠 'closed' 事件里置 null，
-// 两者都要有（见下面的 closed 监听）—— 光靠事件的话，事件还没派发到之前的
-// 那一瞬间点第二次会拿到一个已销毁的窗口去 focus()，直接抛异常。
-let settingsWin: BrowserWindow | null = null
-
-function openSettingsWindow(): void {
-  if (settingsWin && !settingsWin.isDestroyed()) {
-    // 已经开着：聚焦它，不开第二个。show() 一并调上，覆盖"被最小化了"的情况——
-    // 光 focus() 一个最小化的窗口在 macOS 上什么也不会发生，用户按 ⌘, 像没反应。
-    if (settingsWin.isMinimized()) settingsWin.restore()
-    settingsWin.show()
-    settingsWin.focus()
-    return
-  }
-
-  const win = new BrowserWindow({
-    // 按设置面板本身的内容定尺寸（左 160px 导航 + 右侧字段列），不是主窗口的 1100×760。
-    width: 720,
-    height: 620,
-    // 可缩放但有下限：再窄下去左导航和字段列会互相挤，字段的 hint 文字开始换行成两三行。
-    minWidth: 560,
-    minHeight: 420,
-    // 跟 SettingsPanel 根元素的 bg-canvas 一致（styles.css 的 --color-canvas）。
-    // 不一致的话开窗那一瞬间会闪一下别的颜色。
-    backgroundColor: '#1c1d1f',
-    title: '设置',
-    // 跟主窗口一致：留系统红绿灯、标题栏自己画。
-    // 代价是这个窗口也要自己给红绿灯让位（SettingsPanel 的 header 有 pl-20）
-    // 和自己画拖拽区（那条 header 整条是 drag）。
-    titleBarStyle: 'hiddenInset',
-    titleBarOverlay: { color: '#1c1d1f', symbolColor: '#a5a8ad', height: 36 },
-    webPreferences: {
-      // 两个窗口共用同一个 preload：暴露的 API 是同一套，设置窗口只是少用几个。
-      // contextIsolation / nodeIntegration 的安全姿势跟主窗口一模一样，
-      // 不因为"它只是个设置面板"就放松。
-      preload: join(here, '../preload/preload.cjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-    },
-  })
-  settingsWin = win
-
-  if (process.env.ELECTRON_RENDERER_URL) {
-    // dev server 下第二个入口是 /settings.html（electron.vite.config.ts 的
-    // renderer.build.rollupOptions.input 里那个 settings 入口）。
-    win.loadURL(`${process.env.ELECTRON_RENDERER_URL}/settings.html`)
-  } else {
-    win.loadFile(join(here, '../renderer/settings.html'))
-  }
-
-  // 关掉之后把引用清干净，下次 ⌘, 重新建一个。不清的话下次会走进上面那个
-  // "已经开着"分支，拿一个已销毁的窗口去 focus()。
-  win.on('closed', () => {
-    if (settingsWin === win) settingsWin = null
-  })
-}
 
 // 广播给所有窗口。设置改动必须走这条路而不是只回给发起 invoke 的那个窗口：
 // 两个 renderer 之后，"谁写的谁知道"已经不够了 —— 主窗口得从广播里听说。
@@ -172,7 +114,7 @@ app.whenReady().then(async () => {
   // openSettings 跟 ping 一样尽早注册、不等 createRuntime：设置窗口的入口
   // （侧边栏齿轮、⌘,）在启动画面期间就该能用 —— 启动失败最常见的原因就是
   // 没配 API Key，那时候设置窗口正是用户唯一的出路。
-  ipcMain.handle(CH.openSettings, () => openSettingsWindow())
+
 
   // 菜单同理，在 createRuntime 之前就装上，否则启动那几十秒里 ⌘, 是死键。
   // 加速键挂在菜单项上而不是 globalShortcut（那是系统级的，会把 ⌘, 从别的
@@ -182,7 +124,19 @@ app.whenReady().then(async () => {
       buildMenuTemplate({
         platform: process.platform,
         appName: app.getName(),
-        onOpenSettings: openSettingsWindow,
+        // 菜单在 createWindow 之前就装上（启动那几十秒里 ⌘, 不能是死键），
+        // 所以不能在这儿捕获窗口引用 —— 点的时候再去取。设置在右栏渲染，
+        // 主进程只负责喊一声，切视图是 renderer 的事（App.tsx 的 showSettings）。
+        onOpenSettings: () => {
+          const win = BrowserWindow.getAllWindows()[0]
+          if (!win || win.isDestroyed()) return
+          // 设置在主窗口里，所以顺手把窗口带到前面来 —— ⌘, 可能是在别的
+          // 应用里按的（菜单是全局的），那时光发事件用户看不到任何反应。
+          if (win.isMinimized()) win.restore()
+          win.show()
+          win.focus()
+          win.webContents.send(CH.openSettings)
+        },
       }) as Electron.MenuItemConstructorOptions[],
     ),
   )
@@ -217,6 +171,9 @@ app.whenReady().then(async () => {
 
   let runtime: AgentRuntime | undefined
   let quitting = false
+  // setupIpcHandlers 的返回值。before-quit 要用它收子进程，而那个 handler
+  // 注册得比 setupIpcHandlers 早（启动失败也要能干净退出），所以留个可变引用
+  let runnerRef: ReturnType<typeof setupIpcHandlers> | null = null
   let restarting = false // 防止重启过程中接受新工作
   // 整个 app 共享一个 gate：审批请求不区分是哪个 session 发起的连接,
   // 但取消（窗口关闭/退出/删除会话）需要按 sessionId 定点清理，所以在这里
@@ -237,6 +194,11 @@ app.whenReady().then(async () => {
   // quitting 标志防重入：手动调用 app.quit() 会让 before-quit 再触发一次。
   app.on('before-quit', (event) => {
     cancelAllPending()
+    // 外部 CLI 的 npx 子进程也要收 —— 和 MCP 同一个理由。它们的 stderr 是
+    // inherit，父进程没了不会自己退，会变成孤儿留在系统里。
+    // 放在 quitting 判断**之前**：这一句是同步的、幂等的，而下面那个分支
+    // 在 runtime 为空时会直接 return（启动失败的路径），那时子进程同样要收
+    runnerRef?.disposeProviders()
     if (quitting || !runtime) return
     quitting = true
     event.preventDefault()
@@ -262,14 +224,21 @@ app.whenReady().then(async () => {
 
     runtime = await createRuntime(
       config,
-      { own: ownServerSpec(pathsInput), fs: fsServerSpec(pathsInput) },
+      // fs server 不在这里了：它的允许目录是沙箱边界，要跟着会话所属的
+      // 项目变，所以按目录懒建（见 fs-tools.ts）
+      { own: ownServerSpec(pathsInput) },
       sendStatus,
     )
+
+    const fsPool = createFsToolsPool()
 
     // win 用来发 agent 事件（chunk/toolCall/approval 这些只有主窗口关心）；
     // broadcast 用来发设置和项目的变更（所有窗口都要知道）。两者分开传，
     // 免得 ipc-handlers 自己去 import electron 的 BrowserWindow 找别的窗口。
-    const runnerInterface = setupIpcHandlers(win, runtime, paths, gate, () => restarting, broadcast)
+    const runnerInterface = setupIpcHandlers(win, runtime, paths, gate, () => restarting, broadcast, fsPool)
+    // before-quit 在这之前就注册了（它要能处理「启动到一半就退出」），
+    // 所以用一个可变引用把它接上，而不是把注册挪到这儿
+    runnerRef = runnerInterface
 
     // 健康路径的重启：只允许在没有活跃工作（运行中的 turn 或待审批）时调用。
     // Task 14 把 restartApp 移到失败态专用是为了避免不加防护的"随时可 quit"——

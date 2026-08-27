@@ -12,8 +12,13 @@ import type { RuntimeStatusEvent } from '../shared/channels'
 import type { Config, ToolRegistry } from '../../src/types'
 
 export interface AgentRuntime {
+  /**
+   * 和会话无关的全局工具：Skills（自建 server）+ 笔记检索。
+   *
+   * **不含文件工具** —— 那些按会话所属项目的目录懒建，见 fs-tools.ts。
+   * agent-runner 每轮把两者合起来。
+   */
   registry: ToolRegistry
-  fsToolsAvailable: boolean
   close(): Promise<void>
 }
 
@@ -34,7 +39,8 @@ const defaultDeps: RuntimeDeps = {
 
 export async function createRuntime(
   config: Config,
-  specs: { own: McpServerSpec; fs: McpServerSpec },
+  // fs server 移出去了（按项目目录建），所以这里只要自建那个
+  specs: { own: McpServerSpec },
   onStatus: (event: RuntimeStatusEvent) => void,
   deps: Partial<RuntimeDeps> = {},
 ): Promise<AgentRuntime> {
@@ -53,22 +59,17 @@ export async function createRuntime(
     const own = await d.loadMcpToolsFromServers([specs.own], connectMcpWithEnv)
     closers.push(own.close)
 
-    // fs server 依赖 npx 联网拉包，打包环境不可靠 —— 失败就跳过，不阻塞启动
-    let fsTools: ToolRegistry = {}
-    let fsToolsAvailable = false
-    try {
-      const fs = await d.loadMcpToolsFromServers([specs.fs], connectMcpWithEnv)
-      closers.push(fs.close)
-      fsTools = fs.tools
-      fsToolsAvailable = true
-    } catch {
-      fsToolsAvailable = false
-    }
-
+    // fs server **不在这里建了**。
+    //
+    // 它的允许目录就是沙箱边界，而边界要跟着「这个会话属于哪个项目」变 ——
+    // 在这里建一次意味着全应用共用一个固定边界（原来就是那样：写死成
+    // 一个全局 notesDir）。现在按项目目录懒建 + 缓存，见 fs-tools.ts。
+    //
+    // 留在这里的都是**和会话无关**的全局资源：embedding 模型、笔记索引、
+    // 自建 server（Skills，它不碰用户的文件）。
     const searchTool = d.makeSearchNotesTool({ store, embed })
     const registry: ToolRegistry = {
       ...own.tools,
-      ...fsTools,
       [searchTool.name]: searchTool,
     }
 
@@ -76,7 +77,6 @@ export async function createRuntime(
 
     return {
       registry,
-      fsToolsAvailable,
       close: async () => {
         for (const close of closers) await close().catch(() => {})
       },

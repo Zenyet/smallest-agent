@@ -3,6 +3,14 @@
 import type { ElectronAPI } from '../../main/preload'
 
 // 测试环境的 fallback mock
+const emptyProvidersView = {
+  options: [{ id: 'builtin', name: '内置 agent', external: false }],
+  current: 'builtin',
+  models: [],
+  permission: 'ask' as const,
+  configPath: '',
+}
+
 const mockAPI: ElectronAPI = {
   ping: async () => 'pong',
   sendMessage: async () => {},
@@ -10,7 +18,6 @@ const mockAPI: ElectronAPI = {
   getSettings: async () => ({}),
   saveSettings: async () => ({}),
   restartApp: async () => {},
-  openSettings: async () => {},
   listSessions: async () => [],
   createSession: async () => 'mock-session',
   deleteSession: async () => {},
@@ -21,9 +28,15 @@ const mockAPI: ElectronAPI = {
   showContextMenu: async () => [],
   getSessionTitles: async () => ({}),
   renameSession: async () => ({}),
+  truncateSession: async () => [],
   assignSession: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
   toggleProjectCollapsed: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
   respondApproval: async () => {},
+  getProviders: async () => emptyProvidersView,
+  setSessionProvider: async () => emptyProvidersView,
+  setSessionModel: async () => emptyProvidersView,
+  setSessionPermission: async () => emptyProvidersView,
+  onProvidersChanged: () => () => {},
   detectProviders: async () => [],
   importProvider: async () => null,
   getRuntimeStatus: async () => ({ phase: 'ready', detail: 'mock' }),
@@ -37,6 +50,7 @@ const mockAPI: ElectronAPI = {
   onCancelled: () => () => {},
   onRuntimeStatus: () => () => {},
   onApprovalRequest: () => () => {},
+  onOpenSettings: () => () => {},
   onSettingsChanged: () => () => {},
   onProjectsChanged: () => () => {},
 }

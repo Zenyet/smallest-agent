@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { SessionList } from './components/SessionList'
+import { catalog as buildCatalog, DEFAULT_VENDOR, defaultModel } from '../../main/vendors'
 import { ChatWindow, type BlockedBy } from './components/ChatWindow'
+import { SettingsPanel } from './components/SettingsPanel'
+import { SettingsNav } from './components/SettingsNav'
+import { SECTIONS, type SectionId } from './settings-fields'
+import type { PermissionMode } from '../../main/providers'
 import { StartupScreen } from './components/StartupScreen'
 import { ContextMenu, CLOSED, type ContextMenuState } from './components/ContextMenu'
 import { chatReducer, emptySession } from './chat-reducer'
@@ -8,9 +13,11 @@ import { groupSessions } from '../../main/projects'
 import { api } from './api'
 import type {
   ApprovalDecision,
+  DesktopSettings,
   SessionMeta,
   ProjectsState,
   RuntimeStatusEvent,
+  ProvidersView,
 } from '../../shared/channels'
 
 // 新建的空会话在第一条消息回完之前不落盘（见 create() 的乐观更新），
@@ -102,19 +109,67 @@ export function App() {
     void api.getRuntimeStatus().then(setStatus)
   }, [])
 
-  // 这里以前还有一个「等 ready 之后拉 settings」的 effect。设置搬进独立窗口后，
-  // 那份 state 在主窗口里没有任何消费者了（面板不在这儿渲染，draft 也不在这儿播种），
-  // 所以整块删掉，而不是留一份没人读、还会慢慢变旧的副本。
+  // 设置的一份副本，只为 composer 左下角那个模型选择器存在。
   //
-  // 那段注释警告的坑（settings 没读回来就渲染面板 → 一排空输入框 → 一保存把好的
-  // key 冲掉）没有丢，它跟着面板搬到了 SettingsWindow.tsx：那边同样等 phase 落定
-  // 才 getSettings，且在拿到之前不渲染 SettingsPanel。
+  // 这块以前删掉过，理由是「没有消费者，留着会慢慢变旧」。现在有了真消费者：
+  // 选择器要显示当前模型、要按已配的厂商列出可选项，这两件事都得读设置。
+  // 订阅 onSettingsChanged 而不是只靠 saveSettings 的返回值：设置也可能
+  // 在别处改（主进程自己写、将来的第二个窗口），只认自己那次写的结果会让
+  // 手里这份悄悄变成死的。
+  const [settings, setSettings] = useState<DesktopSettings | null>(null)
+  const settled = status.phase === 'ready' || status.phase === 'failed'
+  useEffect(() => {
+    // phase 落定之前不能调：会话/设置那些 ipcMain.handle 是 createRuntime
+    // 跑完才注册的，早调会砸在 No handler registered 上，而且没人重试。
+    if (!settled) return
+    void api.getSettings().then(setSettings).catch((err: unknown) => {
+      console.error('[settings] 读取失败：', err instanceof Error ? err.message : err)
+    })
+  }, [settled])
+  useEffect(() => api.onSettingsChanged(setSettings), [])
+
+  // 设置在右栏渲染，不开第二个窗口。原来是独立 BrowserWindow（照 macOS ⌘,
+  // 的原生做法），但这个 app 的设置是「跟着对话调的东西」——改完 key 要回来
+  // 接着问，独立窗口每次都得切窗口、还会挡住对话。放右栏之后它和会话是同一
+  // 层级的两个视图，侧边栏始终在，切回来就是一下。
+  const [showSettings, setShowSettings] = useState(false)
+  // 当前在设置的哪一页。状态提到这里而不是留在 SettingsPanel 里，因为
+  // 现在有**两个**组件要读它：左栏的 SettingsNav 画选中态，右栏的
+  // SettingsPanel 决定渲染哪一页。留在面板里的话导航拿不到。
+  const [settingsSection, setSettingsSection] = useState<SectionId>(SECTIONS[0].id)
+
+  // Agent 模式（内置 agent / 外部 CLI）。
   //
-  // 设置改动要不要通知主窗口：主进程每轮都用 readConfig() 重新读一次设置
-  // （见 ipc-handlers.ts），所以 STREAM / MAX_TURNS 这类改动下一轮自然生效，
-  // 主窗口不需要知道。NOTES_DIR / EMBEDDING_MODEL 要重启才生效，那条路由
-  // 设置窗口自己的重启警告负责。广播（CH.settingsChanged）仍然发给所有窗口，
-  // 设置窗口靠它推进重启警告的比较基线。
+  // 按会话取而不是全局一份：绑定是每会话的（会话 A 用内置、B 用 Claude Code），
+  // 所以切会话要重新取。写操作的返回值就是新视图，不自己推算下一个状态 ——
+  // 和项目分组同一条理由。
+  const [providers, setProviders] = useState<ProvidersView | null>(null)
+
+  // 原生菜单的 ⌘, 走主进程 → 这里。菜单项在主进程注册（app-menu.ts），
+  // 它没法直接改 renderer 的 state，所以发一个事件过来。
+  useEffect(() => api.onOpenSettings(() => setShowSettings(true)), [])
+
+  // 保存：拿主进程返回的完整设置覆盖本地副本，不自己推算下一个状态
+  // （和 projects 那几个写操作同一个约定）。主进程还会广播
+  // onSettingsChanged，那次覆盖是幂等的。
+  const saveSettings = useCallback(async (patch: DesktopSettings) => {
+    const next = await api.saveSettings(patch)
+    setSettings(next)
+  }, [])
+
+  const restart = useCallback(async () => {
+    await api.restartApp()
+  }, [])
+
+  // 「settings 没读回来就渲染面板 → 一排空输入框 → 一保存把好 key 冲掉」这个坑
+  // 现在归这里管了（面板在右栏）：settings 为 null 时渲染「读取设置中…」而不是
+  // SettingsPanel —— 它的 draft 只在挂载时播种一次，用空对象播种之后用户一改
+  // 别的字段就会把磁盘上那份整体冲掉。见下面 showSettings 那段渲染。
+  //
+  // 改了设置什么时候生效：主进程每轮都用 readConfig() 重新读一次
+  // （见 ipc-handlers.ts），所以 STREAM / MAX_TURNS 这类下一轮自然生效。
+  // NOTES_DIR / EMBEDDING_MODEL 要重启，那条路由 SettingsPanel 自己的
+  // 重启警告负责。
 
   // 启动时拉会话列表和项目状态，没有会话就开一个新的；同时拉一次 runner 快照，
   // 把"谁在跑、谁在等审批"这两件事也补回来——这两者都活在主进程里，不会因为
@@ -149,6 +204,94 @@ export function App() {
       }
     })()
   }, [status.phase])
+
+  // --- composer 的模型选择器 ---
+  //
+  // 可选项从设置推出来（哪几家配了 key、自定义端点填了哪些模型），
+  // 解析逻辑跟主进程共用 main/vendors.ts —— 那个文件不 import electron，
+  // 所以两边读的是同一份目录，不会各自推算出不同的清单。
+  const modelCatalog = useMemo(
+    () => (settings ? buildCatalog((key) => settings[key]) : []),
+    [settings],
+  )
+  // 当前选中的厂商/模型。设置里没写时退回默认值 —— 跟主进程
+  // resolveActiveProvider 的兜底规则一致（config-env.ts），否则选择器显示的
+  // 和实际请求用的会是两回事。
+  const activeVendor = settings?.ACTIVE_VENDOR || DEFAULT_VENDOR
+  const activeModel = settings?.ACTIVE_MODEL || defaultModel(activeVendor) || ''
+
+  // 换模型：一次写两个键（厂商和模型绑在一起，见 ModelPicker 的文件头）。
+  // 乐观更新本地副本，让选择器立刻反映点击结果 —— saveSettings 要走一趟
+  // 主进程，不先更新的话会看到一下明显的迟滞。主进程随后广播
+  // onSettingsChanged，那次覆盖是幂等的。
+  const pickModel = useCallback((vendorId: string, modelId: string) => {
+    setSettings((prev) => (prev ? { ...prev, ACTIVE_VENDOR: vendorId, ACTIVE_MODEL: modelId } : prev))
+    void api
+      .saveSettings({ ACTIVE_VENDOR: vendorId, ACTIVE_MODEL: modelId })
+      .catch((err: unknown) => {
+        console.error('[settings] 保存模型选择失败：', err instanceof Error ? err.message : err)
+      })
+  }, [])
+
+  // 取当前会话的 Agent 模式视图。切会话要重新取 —— 绑定是每会话的。
+  useEffect(() => {
+    if (!currentId) {
+      setProviders(null)
+      return
+    }
+    let alive = true
+    void api
+      .getProviders(currentId)
+      .then((view) => {
+        // 取回来的时候用户可能已经切走了。不判的话晚到的响应会把新会话的
+        // 视图覆盖成旧会话的 —— 表现为「切过去一瞬间显示的是上一个会话的引擎」
+        if (alive) setProviders(view)
+      })
+      .catch((err: unknown) => {
+        console.error('[providers] 读取失败：', err instanceof Error ? err.message : err)
+      })
+    return () => {
+      alive = false
+    }
+  }, [currentId])
+
+  // 主进程广播的变更（另一个窗口改了、或者配置文件被重新加载）
+  useEffect(() => api.onProvidersChanged(setProviders), [])
+
+  const pickProvider = useCallback(
+    (providerId: string) => {
+      if (!currentId) return
+      // 乐观更新：点了立刻反映在选择器上，saveProvider 的返回值随后覆盖一次
+      // （幂等）。不乐观的话点一下要等一个 IPC 往返才变，看着像没点上
+      setProviders((prev) => (prev ? { ...prev, current: providerId } : prev))
+      void api.setSessionProvider(currentId, providerId).then(setProviders).catch((err: unknown) => {
+        console.error('[providers] 切换引擎失败：', err instanceof Error ? err.message : err)
+      })
+    },
+    [currentId],
+  )
+
+  const pickCliModel = useCallback(
+    (modelId: string) => {
+      if (!currentId) return
+      setProviders((prev) => (prev ? { ...prev, currentModel: modelId } : prev))
+      void api.setSessionModel(currentId, modelId).then(setProviders).catch((err: unknown) => {
+        console.error('[providers] 切换模型失败：', err instanceof Error ? err.message : err)
+      })
+    },
+    [currentId],
+  )
+
+  const pickPermission = useCallback(
+    (mode: PermissionMode) => {
+      if (!currentId) return
+      setProviders((prev) => (prev ? { ...prev, permission: mode } : prev))
+      void api.setSessionPermission(currentId, mode).then(setProviders).catch((err: unknown) => {
+        console.error('[providers] 切换权限失败：', err instanceof Error ? err.message : err)
+      })
+    },
+    [currentId],
+  )
 
   // 切换会话时从磁盘加载历史（内存里没有的话）
   const select = useCallback(
@@ -287,6 +430,57 @@ export function App() {
     [currentId],
   )
 
+  // 编辑重发：砍掉这条及之后的历史，用新内容重新提问。
+  //
+  // ## 为什么要砍历史
+  //
+  // 编辑重发的语义是「从这里重新开始」。不砍的话，模型下一轮会看到
+  // 「旧问题 + 旧答案 + 新问题」，而旧答案回答的是一个已经被改掉的问题。
+  //
+  // ## 为什么磁盘也要砍
+  //
+  // 只改界面不改磁盘的话，重开 app 之后被砍掉的那几条会**回来** ——
+  // 而且下一轮对话仍然会带着它们（core 每轮从磁盘读历史）。
+  //
+  // ## 界面下标怎么变成「第几条 user」
+  //
+  // 磁盘和界面的下标不是一一对应的（磁盘上一轮是好几条消息，界面压成一个
+  // 气泡），所以传下标过去没意义。能对齐两边的锚点是用户消息 —— 它在两边
+  // 都是一条、顺序一致。见 main/truncate.ts。
+  const editResend = useCallback(
+    (idx: number, text: string) => {
+      if (!currentId) return
+      const chat = chats[currentId]
+      if (!chat) return
+      // 这条之前有几条用户消息 = 它是第几条 user（0-based）
+      const nthUser = chat.messages.slice(0, idx).filter((m) => m.role === 'user').length
+      // 先砍磁盘再重放界面，最后走正常的发送路径。
+      //
+      // 复用 send() 而不是自己拼一遍：那条路上有必须做的事（乐观标 running、
+      // 失败兜底成看得见的错误），抄一份必然漏掉其中一件。
+      api
+        .truncateSession(currentId, nthUser)
+        .then((truncated) => {
+          // 用主进程返回的那份重放界面，而不是本地 slice 一刀 ——
+          // 「砍完剩什么」的真相在磁盘那边（它按 user 锚点定位，
+          // 会把那一轮的工具轨迹一起带走），renderer 不自己推算。
+          dispatch({ type: 'loaded', sessionId: currentId, messages: truncated })
+          send(text)
+        })
+        .catch((err: unknown) => {
+          dispatch({
+            type: 'error',
+            event: {
+              sessionId: currentId,
+              code: 'UNKNOWN',
+              message: err instanceof Error ? err.message : String(err),
+            },
+          })
+        })
+    },
+    [currentId, chats, send],
+  )
+
   // agent 是全局串行的（agent-runner.ts 的 busy 锁不区分 session），所以「哪个会话在跑」
   // 这件事必须在 UI 里显式暴露出来，否则用户在别的会话里点发送只会换来一个
   // 事后才出现的 BUSY 错误，既不知道是谁占着、也没法去处理挡路的那个审批。
@@ -313,9 +507,6 @@ export function App() {
   const jumpToBlocking = useCallback(() => {
     if (blockedBy) void select(blockedBy.sessionId)
   }, [blockedBy, select])
-
-  // saveSettings 从这里搬走了：写设置现在是设置窗口自己的事（SettingsWindow.tsx），
-  // 主窗口只负责把那个窗口叫出来。
 
   const chat = (currentId && chats[currentId]) || emptySession()
 
@@ -354,96 +545,127 @@ export function App() {
           没必要让整个 app 顶上留一条空白横条。
           这样左右两个容器直接顶到窗口上沿，占满整个视口。 */}
       <div className="flex min-h-0 flex-1">
-        <SessionList
-          groups={groups}
-          currentId={currentId}
-          currentProjectId={currentProjectId}
-          onSelect={(id) => void select(id)}
-          onCreate={() => void create()}
-          // 右键菜单：SessionList 只报告「哪一项被右键了 + 光标在哪」，菜单内容
-          // 从主进程拿（menuFor，产品决定留在那一侧），弹出和关闭在这边自绘。
-          // 删除本身没变 —— 包括 tombstone；正在跑的会话现在会先取消再删。
-          onSessionContextMenu={(id, title, at) => {
-            void api
-              .showContextMenu({ kind: 'session', id, title })
-              .then((specs) => {
-                setMenu({
-                  at,
-                  items: specs.map((spec) => ({
-                    label: spec.label,
-                    destructive: spec.destructive,
-                    onSelect: () => {
-                      if (spec.action === 'delete-session') void remove(id)
-                      // 改名不在这里落盘：先把这一行换成输入框，用户敲完
-                      // 回车才写（见 SessionList 的 renaming 分支）
-                      if (spec.action === 'rename-session') setRenamingId(id)
-                    },
-                  })),
+        {/* 左栏：设置打开时整个换成分区导航，而不是在右栏里再长出
+            第二列导航。理由见 SettingsNav.tsx 的文件头 —— 224px 的一栏
+            放不下两组导航，而在设置里的时候用户并不需要切会话。 */}
+        {showSettings ? (
+          <SettingsNav
+            active={settingsSection}
+            onSelect={setSettingsSection}
+            onClose={() => setShowSettings(false)}
+          />
+        ) : (
+          <SessionList
+            groups={groups}
+            currentId={currentId}
+            currentProjectId={currentProjectId}
+            onSelect={(id) => void select(id)}
+            onCreate={() => void create()}
+            // 右键菜单：SessionList 只报告「哪一项被右键了 + 光标在哪」，菜单内容
+            // 从主进程拿（menuFor，产品决定留在那一侧），弹出和关闭在这边自绘。
+            // 删除本身没变 —— 包括 tombstone；正在跑的会话现在会先取消再删。
+            onSessionContextMenu={(id, title, at) => {
+              void api
+                .showContextMenu({ kind: 'session', id, title })
+                .then((specs) => {
+                  setMenu({
+                    at,
+                    items: specs.map((spec) => ({
+                      label: spec.label,
+                      destructive: spec.destructive,
+                      onSelect: () => {
+                        if (spec.action === 'delete-session') void remove(id)
+                        // 改名不在这里落盘：先把这一行换成输入框，用户敲完
+                        // 回车才写（见 SessionList 的 renaming 分支）
+                        if (spec.action === 'rename-session') setRenamingId(id)
+                      },
+                    })),
+                  })
                 })
-              })
-              .catch((err: unknown) => {
-                console.error('[context-menu] 取菜单项失败：', err instanceof Error ? err.message : err)
-              })
-          }}
-          onProjectContextMenu={(id, name, at) => {
-            void api
-              .showContextMenu({ kind: 'project', id, name })
-              .then((specs) => {
-                setMenu({
-                  at,
-                  items: specs.map((spec) => ({
-                    label: spec.label,
-                    destructive: spec.destructive,
-                    onSelect: () => {
-                      if (spec.action === 'remove-project') void removeProjectById(id)
-                    },
-                  })),
+                .catch((err: unknown) => {
+                  console.error('[context-menu] 取菜单项失败：', err instanceof Error ? err.message : err)
                 })
-              })
-              .catch((err: unknown) => {
-                console.error('[context-menu] 取菜单项失败：', err instanceof Error ? err.message : err)
-              })
-          }}
-          renamingId={renamingId}
-          onRename={(id, title) => {
-            setRenamingId(null)
-            void api
-              .renameSession(id, title)
-              // 改完重新拉一次列表：标题的真相在主进程（listSessions 会把
-              // 用户起的名字覆盖上去），renderer 不自己改手里那份 ——
-              // 那样两处各推算一份，迟早分叉。走 mergeSessions 是为了尊重
-              // tombstone（见文件头那段说明）。
-              .then(async () => {
-                const list = await api.listSessions()
-                setSessions(mergeSessions(list, sessions, deletedIdsRef.current))
-              })
-              .catch((err: unknown) => {
-                console.error('[rename] 改名失败：', err instanceof Error ? err.message : err)
-              })
-          }}
-          onCancelRename={() => setRenamingId(null)}
-          // 设置是另一个窗口了（macOS ⌘, 的原生做法），不再是这里的一个 state。
-          // 单例、聚焦、重复打开这些都由主进程负责，这边只管喊一声。
-          // .catch 不能省：这个项目已经在 Task 13/15 因为丢 .catch 栽过两次，
-          // 裸 void 的话「点了齿轮什么都没发生」会连日志都没有。
-          onOpenSettings={() =>
-            void api.openSettings().catch((err: unknown) => {
-              console.error('[settings] 打开设置窗口失败：', err instanceof Error ? err.message : err)
-            })
-          }
-          onAddProject={() => void addProject()}
-          onToggleCollapsed={(id) => void toggleCollapsed(id)}
-          onSelectProject={setCurrentProjectId}
-        />
-        <ChatWindow
-          chat={chat}
-          sessionId={currentId ?? ''}
-          onSend={send}
-          onCancel={cancel}
-          onDecide={onDecide}
-          blockedBy={blockedBy}
-          onJumpToBlocking={jumpToBlocking}
-        />
+            }}
+            onProjectContextMenu={(id, name, at) => {
+              void api
+                .showContextMenu({ kind: 'project', id, name })
+                .then((specs) => {
+                  setMenu({
+                    at,
+                    items: specs.map((spec) => ({
+                      label: spec.label,
+                      destructive: spec.destructive,
+                      onSelect: () => {
+                        if (spec.action === 'remove-project') void removeProjectById(id)
+                      },
+                    })),
+                  })
+                })
+                .catch((err: unknown) => {
+                  console.error('[context-menu] 取菜单项失败：', err instanceof Error ? err.message : err)
+                })
+            }}
+            renamingId={renamingId}
+            onRename={(id, title) => {
+              setRenamingId(null)
+              void api
+                .renameSession(id, title)
+                // 改完重新拉一次列表：标题的真相在主进程（listSessions 会把
+                // 用户起的名字覆盖上去），renderer 不自己改手里那份 ——
+                // 那样两处各推算一份，迟早分叉。走 mergeSessions 是为了尊重
+                // tombstone（见文件头那段说明）。
+                .then(async () => {
+                  const list = await api.listSessions()
+                  setSessions(mergeSessions(list, sessions, deletedIdsRef.current))
+                })
+                .catch((err: unknown) => {
+                  console.error('[rename] 改名失败：', err instanceof Error ? err.message : err)
+                })
+            }}
+            onCancelRename={() => setRenamingId(null)}
+            onOpenSettings={() => setShowSettings(true)}
+            onAddProject={() => void addProject()}
+            onToggleCollapsed={(id) => void toggleCollapsed(id)}
+            onSelectProject={setCurrentProjectId}
+          />
+        )}
+        {showSettings ? (
+          // settings 还没读回来时不渲染面板：SettingsPanel 的 draft 只在挂载时
+          // 播种一次，提前挂载等于用空对象播种，用户一改别的字段就会把磁盘上
+          // 那份好的设置整体冲掉（这个坑在独立窗口那版就记着，跟着搬过来）。
+          settings ? (
+            <SettingsPanel
+              settings={settings}
+              activeSection={settingsSection}
+              providers={providers ?? undefined}
+              onSave={saveSettings}
+              onRestart={restart}
+            />
+          ) : (
+            <div className="flex flex-1 items-center justify-center text-[12.5px] text-ink-3">
+              读取设置中…
+            </div>
+          )
+        ) : (
+          <ChatWindow
+            chat={chat}
+            sessionId={currentId ?? ''}
+            onSend={send}
+            onCancel={cancel}
+            onDecide={onDecide}
+            blockedBy={blockedBy}
+            onJumpToBlocking={jumpToBlocking}
+            modelCatalog={modelCatalog}
+            currentVendor={activeVendor}
+            currentModel={activeModel}
+            onPickModel={pickModel}
+            onEditResend={editResend}
+            providers={providers ?? undefined}
+            onPickProvider={pickProvider}
+            onPickCliModel={pickCliModel}
+            onPickPermission={pickPermission}
+          />
+        )}
       </div>
       {/* 右键菜单挂在最外层：popover 会自己进 top layer，所以挂哪儿都不会被
           父容器的 overflow 裁掉，但放在这里更符合「它不属于某一栏」的事实。 */}

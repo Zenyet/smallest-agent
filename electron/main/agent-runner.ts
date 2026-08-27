@@ -1,16 +1,19 @@
 // 请求级装配 + 串行锁。每条消息走一次这里。
 // 串行的理由：会话文件是「读-改-写」，并发会互相覆盖；个人使用也没有并发收益。
-import { runAgent as realRunAgent, type TurnInfo } from '../../src/agent'
+import { runAgent as realRunAgent } from '../../src/agent'
 import { makeCallModel } from '../../src/llm'
 import { createJsonSessionStore } from '../../src/memory/store'
 import { makeSummarizer } from '../../src/memory/summarize'
-import { compactMessages, type Summarize } from '../../src/memory/compact'
+import { type Summarize } from '../../src/memory/compact'
 import { makeVerifier, type Verdict, type VerifyInput } from '../../src/verify'
 import { loadConfig as realLoadConfig } from '../../src/config'
 import { buildCallModel as realBuildCallModel } from './call-model'
 import { toErrorEvent } from './errors'
-import { createApprovalGate, guardRegistry, type ApprovalGate } from './approval'
-import { CancelToken, isCancelled, withCancel } from './cancel'
+import { createApprovalGate, type ApprovalGate, type GuardMode } from './approval'
+import { CancelToken, isCancelled } from './cancel'
+import { createBuiltinProvider } from './provider/builtin'
+import type { Provider, TurnEvent } from './provider/types'
+import type { FsToolsPool } from './fs-tools'
 import type { SessionStore } from '../../src/memory/store'
 import type { CallModel, Config, Message, ToolRegistry } from '../../src/types'
 import type {
@@ -52,6 +55,32 @@ export interface RunnerDeps {
   // 写工具审批闸口。按 session 装饰 registry 必须在 run() 里做（每条请求一次），
   // 不能在 makeDefaultRunnerDeps 里做一次——那时候还没有 sessionId。
   gate: ApprovalGate
+  /**
+   * 这一轮该由哪个 provider 跑。返回 null / 不传 = 用内置 agent。
+   *
+   * **可选**是有意的：绝大多数测试只关心内置那条路，不传就是原来的行为，
+   * 那 19 条锁 runner 契约的测试因此一行不用改。真实装配在
+   * makeDefaultRunnerDeps 里接上（见那边）。
+   *
+   * 传 sessionId 而不是让 runner 自己读 providers 状态：那份状态活在
+   * electron-store 里，而 runner 是纯逻辑、测试里不该被迫去 mock 一个 store。
+   */
+  resolveProvider?: (sessionId: string) => Provider | null
+  /**
+   * 这个会话的工作目录（外部 CLI 的 cwd）。不传 = 没有项目目录。
+   *
+   * 和 resolveProvider 分开而不是打包成一个「会话上下文」：cwd 的真相在
+   * 项目分组那边（projects-store），provider 的真相在 providers-store，
+   * 两个来源，合成一个对象只会让「谁该更新它」变模糊。
+   */
+  resolveCwd?: (sessionId: string) => string | undefined
+  /**
+   * 这个会话的权限模式（只对内置 agent 有意义 —— 外部 CLI 自带权限模型）。
+   * 不传 = 'ask'，也就是原来的行为。
+   */
+  resolvePermission?: (sessionId: string) => GuardMode
+  /** 文件工具池：按项目目录懒建 + 缓存，见 fs-tools.ts */
+  fsPool?: FsToolsPool
 }
 
 export interface AgentRunner {
@@ -118,70 +147,82 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
         sessions = deps.makeSessionStore(config.sessionsDir)
         const history = await sessions.load(sessionId)
 
-        // 审批装饰同样是请求级的：sessionId 只在这里才知道，装饰过的 registry
-        // 不能在 makeDefaultRunnerDeps 里提前做一次给所有 session 共用。
-        const guardedRegistry = guardRegistry(deps.registry, sessionId, deps.gate, (event) =>
-          deps.emit.approvalRequest(event),
-        )
-
-        // 流式回调绑定本次请求的 sessionId —— 这就是 callModel 必须请求级重建的原因
-        const callModel = deps.buildCallModel(
-          config,
-          guardedRegistry,
-          (text) => deps.emit.chunk({ sessionId, text }),
-          () => deps.emit.cacheHit({ sessionId }),
-        )
-
-        // withCancel 套在**最外层**，即 buildCallModel 的返回值之外。
+        // 这一轮由谁来跑：外部 CLI（ACP）还是内置 agent。
         //
-        // 位置不是洁癖，套错了有实际后果（见 cancel.ts 的注释）：
-        //   • 套在 withRetry 里面 → 取消被当成可重试失败，反复退避几轮才放弃
-        //   • 套在 withFallback 里面 → 取消触发「换备用模型」，反而多打一次请求
-        const cancellableCallModel = withCancel(callModel, token)
+        // 回落到内置而不是报错：resolveProvider 返回 null 的情况是「那个
+        // provider 被删了 / 配置改坏了」，而用户此刻只是想问句话。
+        // 静默回落 + 内置能答，好过让这一轮失败。
+        //
+        // 内置每轮新建而不是构造 runner 时建一个：它无状态（历史每轮显式传），
+        // 重建的代价只是建一个 client；而缓存它反而要处理「MCP 工具热插进来
+        // 之后什么时候失效」。外部反过来 —— 那边按 (provider, 模型) 缓存，
+        // 见 provider/registry.ts。
+        // 文件工具按这个会话的工作目录取。没有工作目录（未分组会话）返回空注册表。
+        const cwd = deps.resolveCwd?.(sessionId)
+        const fsTools = (await deps.fsPool?.forDir(cwd)) ?? {}
+        const composedRegistry = { ...deps.registry, ...fsTools }
 
-        const summarize = deps.makeSummarize(config)
-        const evidence: string[] = []
+        const provider =
+          deps.resolveProvider?.(sessionId) ??
+          createBuiltinProvider({
+            buildCallModel: deps.buildCallModel,
+            makeSummarize: deps.makeSummarize,
+            runAgent: deps.runAgent,
+            registry: composedRegistry,
+            gate: deps.gate,
+            onApprovalRequest: (event) => deps.emit.approvalRequest(event),
+            permission: deps.resolvePermission?.(sessionId),
+          })
 
-        // TurnInfo（src/agent.ts，冻结）不带时间戳。onTurn 在每轮的工具都跑完后才触发一次，
-        // 从不按单个工具调用触发，所以这里能诚实测量的只有「这一轮」的耗时（模型调用 + 该轮所有工具执行），
-        // 不是某个具体工具的耗时。turnStartedAt 在每轮结束时重置，作为下一轮的起点。
-        let turnStartedAt = Date.now()
-
-        const answer = await deps.runAgent(input, {
-          callModel: cancellableCallModel,
-          tools: guardedRegistry,
-          config,
-          history,
-          compact: (messages: Message[]) =>
-            compactMessages(messages, {
-              maxTokens: config.maxContextTokens,
-              keepRecent: config.keepRecent,
-              summarize,
-            }),
-          // system prompt 由 config 决定，不需要进历史文件
-          onComplete: (messages: Message[]) =>
-            sessions!.save(sessionId, messages.filter((m) => m.role !== 'system')),
-          onTurn: (info: TurnInfo) => {
-            const elapsedMs = Date.now() - turnStartedAt
-            turnStartedAt = Date.now()
-            for (const t of info.toolResults) {
-              evidence.push(`${t.name}: ${t.output}`)
+        // provider 产出的事件翻译成 IPC 事件。
+        //
+        // 这一层留在 runner 里而不是让 provider 直接发 IPC：provider 只该知道
+        // 「发生了什么」，不该知道有哪些频道、哪个频道要带 sessionId。
+        // 现有的 8 个频道一个都没动 —— renderer 侧零改动的前提。
+        const onEvent = (e: TurnEvent) => {
+          switch (e.kind) {
+            case 'delta':
+              deps.emit.chunk({ sessionId, text: e.text })
+              break
+            case 'tool-call':
               deps.emit.toolCall({
                 sessionId,
-                turn: info.turn,
-                toolName: t.name,
-                args: t.args,
-                output: t.output,
-                // 同一轮内的所有工具调用共享这一个耗时值 —— 它们本来就是同一轮里一起测量的。
-                elapsedMs,
+                turn: e.turn,
+                toolName: e.name,
+                args: e.args,
+                output: e.output,
+                elapsedMs: e.elapsedMs,
               })
-            }
-          },
+              break
+            case 'cache-hit':
+              deps.emit.cacheHit({ sessionId })
+              break
+            case 'notice':
+              // 外部 CLI 的状态提示（「正在起子进程」之类）。现在还没有 provider
+              // 会发它 —— 内置 agent 没有这类状态。等 ACP 接进来时它需要一条
+              // 显示通路，那时再决定是新开一个频道还是复用 chunk；在此之前
+              // 记一行日志，比静默丢掉好排查
+              console.log(`[provider] ${e.text}`)
+              break
+          }
+        }
+
+        const { answer, evidence } = await provider.runTurn({
+          question: input,
+          sessionId,
+          history,
+          config,
+          cwd: deps.resolveCwd?.(sessionId),
+          emit: onEvent,
+          token,
+          onComplete: (messages) => sessions!.save(sessionId, messages),
         })
 
         deps.emit.complete({ sessionId, text: answer })
 
-        // 只在真的调过工具时核查：纯聊天没有证据可比对，白花一次模型调用
+        // 只在真的调过工具时核查：纯聊天没有证据可比对，白花一次模型调用。
+        // 外部 CLI 永远走这条短路 —— 它自己管工具，我们拿不到可比对的证据
+        // （见 provider/types.ts 里 TurnResult.evidence 的注释）
         if (evidence.length > 0) {
           const verdict = await deps.verify(config, { question: input, answer, evidence })
           deps.emit.verdict({ sessionId, ...verdict })

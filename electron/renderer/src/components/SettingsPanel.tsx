@@ -1,57 +1,60 @@
 import { useEffect, useRef, useState } from 'react'
 import { Icon } from './Icon'
-import { SETTING_KEYS, type DesktopSettings } from '../../../main/config-env'
-import type { ProviderDetection } from '../../../shared/channels'
+import { type DesktopSettings } from '../../../main/config-env'
+import {
+  ALL,
+  CUSTOM_ID,
+  CUSTOM_KEYS,
+  CUSTOM_NAME,
+  find as findVendor,
+  isConfigured,
+  nameOf,
+} from '../../../main/vendors'
+import {
+  ADVANCED_MODEL_KEYS,
+  GROUPS,
+  REQUIRED,
+  RESTART_REQUIRED,
+  SECTIONS,
+  hint,
+  label,
+  type SectionId,
+} from '../settings-fields'
+import type { ProviderDetection, ProvidersView } from '../../../shared/channels'
 import { api } from '../api'
-
-// 每个字段的说明，直接对应 src/config.ts 里的默认值语义
-const HINTS: Partial<Record<(typeof SETTING_KEYS)[number], string>> = {
-  // 明文存储这件事以前挂在面板底部的 footer 里。footer 撤掉后没让这句消失——
-  // 它是一条真实的安全披露（不引 keytar 是为了少一层跨平台打包复杂度），
-  // 挪到用户实际填 key 的这一栏下面，比压在页脚更该被看到。
-  DEEPSEEK_API_KEY: '以明文存在本地 userData 目录，不加密',
-  DEEPSEEK_BASE_URL: '默认 https://api.deepseek.com/v1',
-  DEEPSEEK_MODEL: '默认 deepseek-chat',
-  FALLBACK_MODEL: '主模型连续失败时切换的备用模型',
-  NOTES_DIR: 'RAG 检索的笔记目录，默认 ./notes',
-  EMBEDDING_MODEL: '嵌入模型，默认 Xenova/bge-small-zh-v1.5',
-  HF_ENDPOINT: '国内连不上 HuggingFace 时填 https://hf-mirror.com',
-  STREAM: '填 0 关闭流式输出，填 1 开启',
-  LLM_CACHE: '填 0 关闭磁盘缓存，填 1 开启',
-  MAX_RETRIES: '单个模型调用失败时的重试次数，默认 2',
-  MAX_TURNS: 'agent 循环最多转几圈，默认 10',
-  MAX_CONTEXT_TOKENS: '历史超过这个估算值就压缩，默认 2000',
-  KEEP_RECENT: '压缩时保留最近几条，默认 6',
-}
-
-// 这两个字段改了需要重建索引/重启应用才生效
-const RESTART_REQUIRED = ['NOTES_DIR', 'EMBEDDING_MODEL'] as const
-
-// 新的分组结构：General / Provider / Retrieval / Advanced
-type SectionId = 'general' | 'provider' | 'retrieval' | 'advanced'
-
-const SECTIONS: { id: SectionId; label: string; keys: readonly (typeof SETTING_KEYS)[number][] }[] = [
-  { id: 'general', label: '通用', keys: ['STREAM', 'LLM_CACHE'] },
-  { id: 'provider', label: 'Provider', keys: ['DEEPSEEK_API_KEY', 'DEEPSEEK_BASE_URL', 'DEEPSEEK_MODEL', 'FALLBACK_MODEL'] },
-  { id: 'retrieval', label: '检索', keys: ['NOTES_DIR', 'EMBEDDING_MODEL', 'HF_ENDPOINT'] },
-  { id: 'advanced', label: '高级', keys: ['MAX_RETRIES', 'MAX_TURNS', 'MAX_CONTEXT_TOKENS', 'KEEP_RECENT'] },
-]
 
 export function SettingsPanel({
   settings,
+  activeSection,
+  providers,
   onSave,
-  onClose,
   onRestart,
 }: {
   settings: DesktopSettings
+  /** 当前在哪一页。**由 App 传进来**，不是这里的本地状态 ——
+   *  左栏的 SettingsNav 也要读它来画选中态，见 App.tsx 里那段说明。 */
+  activeSection: SectionId
+  /** Agent 模式那页要列的引擎。不传就只显示说明文字 */
+  providers?: ProvidersView
   onSave: (patch: DesktopSettings) => Promise<void>
-  onClose: () => void
   onRestart: () => Promise<void>
 }) {
   const [draft, setDraft] = useState<DesktopSettings>(settings)
   const [error, setError] = useState<string | null>(null)
-  const [activeSection, setActiveSection] = useState<SectionId>(SECTIONS[0].id)
   const [detections, setDetections] = useState<ProviderDetection[]>([])
+  /**
+   * 凭据表单当前填哪一家。**组件内 state，不落盘** —— 见凭据页那段说明：
+   * 它是表单作用域，不是「谁答我的问题」（那个在 composer）。
+   *
+   * 初值挑一个已经配好的，没有就用第一家 —— 打开设置页时停在「我配过的
+   * 那家」比停在固定的第一家更可能是用户想看的。
+   */
+  const [formVendor, setFormVendor] = useState<string>(() => {
+    const get = (key: string) => settings[key]
+    const configured = [...ALL.map((v) => v.id), CUSTOM_ID].find((id) => isConfigured(id, get))
+    return configured ?? ALL[0].id
+  })
+  const [showAdvanced, setShowAdvanced] = useState(false)
   const [importing, setImporting] = useState<string | null>(null)
   const debounceTimers = useRef<Record<string, NodeJS.Timeout>>({})
 
@@ -64,10 +67,9 @@ export function SettingsPanel({
 
   // 检测是否改了需要重启的字段——横跨所有分组
   const needsRestart = RESTART_REQUIRED.some((key) => (draft[key] ?? '') !== (settings[key] ?? ''))
-  const activeKeys = SECTIONS.find((s) => s.id === activeSection)?.keys ?? []
 
   // 自动保存：toggles 立即保存，text inputs 防抖后保存
-  const persistField = (key: keyof DesktopSettings, value: string, immediate: boolean) => {
+  const persistField = (key: string, value: string, immediate: boolean) => {
     const updated = { ...draft, [key]: value }
     setDraft(updated)
 
@@ -76,10 +78,7 @@ export function SettingsPanel({
         setError(err instanceof Error ? err.message : String(err))
       })
     } else {
-      // 防抖：500ms 后写入
-      if (debounceTimers.current[key]) {
-        clearTimeout(debounceTimers.current[key])
-      }
+      if (debounceTimers.current[key]) clearTimeout(debounceTimers.current[key])
       debounceTimers.current[key] = setTimeout(() => {
         void onSave(updated).catch((err) => {
           setError(err instanceof Error ? err.message : String(err))
@@ -88,7 +87,6 @@ export function SettingsPanel({
     }
   }
 
-  // 清理所有定时器
   useEffect(() => {
     return () => {
       Object.values(debounceTimers.current).forEach(clearTimeout)
@@ -104,7 +102,10 @@ export function SettingsPanel({
     }
   }
 
-  // 导入 provider 配置：点击时才读密钥，填入表单，触发自动保存
+  // 导入 provider 配置：点击时才读密钥，填入表单，触发自动保存。
+  //
+  // 导入的目标键跟着当前选中的厂商走 —— 原来写死 DEEPSEEK_API_KEY，
+  // 多厂商之后那样会把 Claude 的 key 塞进 DeepSeek 那一栏。
   const handleImport = async (provider: 'claude' | 'codex') => {
     setImporting(provider)
     setError(null)
@@ -114,17 +115,35 @@ export function SettingsPanel({
         setError(`无法读取 ${provider} 的配置`)
         return
       }
-
-      // 填入表单（触发自动保存）
-      const patch: DesktopSettings = {
-        ...draft,
-        DEEPSEEK_API_KEY: secret.apiKey,
+      // claude → anthropic，codex → openai。探测出来的凭据属于那一家，
+      // 填到别家的栏里会得到一个 401。
+      const vendorId = provider === 'claude' ? 'anthropic' : 'openai'
+      const keyEnv = findVendor(vendorId)?.keyEnv
+      const patch: DesktopSettings = { ...draft }
+      if (keyEnv) patch[keyEnv] = secret.apiKey
+      // 顺便把它选成当前厂商 —— 用户点「导入」的意图就是要用它
+      patch.ACTIVE_VENDOR = vendorId
+      // 探测到的模型名**只在它属于这家厂商时**才采用。
+      //
+      // 这里原来是无条件 `patch.ACTIVE_MODEL = secret.model`，而 secret.model
+      // 来自被导入的那份 CLI 配置（~/.claude/settings.json 的 model、
+      // ~/.codex/config.toml 的 model =）—— 那个字段可以是任何字符串，
+      // 包括别家的模型名。写进去就得到 {厂商:anthropic, 模型:deepseek-reasoner}
+      // 这种脏组合，发请求时服务端回「Invalid Anthropic API Key」，
+      // 把人往错的方向引（key 是好的，错的是模型名）。
+      //
+      // 认不出就**不写**，让它退回该厂商的默认模型（resolveActiveProvider 里
+      // 的 defaultModel 兜底）—— 导入的主要目的是那把 key，模型用户随后
+      // 在 composer 左下角自己选。
+      const vendorModels = findVendor(vendorId)?.models ?? []
+      if (secret.model && vendorModels.some((m) => m.id === secret.model)) {
+        patch.ACTIVE_MODEL = secret.model
+      } else {
+        // 之前可能残留了一个别家的模型名，清掉 —— 不清的话这次导入
+        // 反而把脏组合保留下来了
+        patch.ACTIVE_MODEL = ''
       }
-      if (secret.baseUrl) patch.DEEPSEEK_BASE_URL = secret.baseUrl
-      if (secret.model) patch.DEEPSEEK_MODEL = secret.model
-
       setDraft(patch)
-      // 立即保存（不防抖）
       await onSave(patch)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -133,67 +152,214 @@ export function SettingsPanel({
     }
   }
 
+  // 这一页要渲染哪些组。全部走 GROUPS 那张静态表 —— 凭据页以前是动态的
+  // （跟着「当前选中哪家」只显示那一家的 key 栏），现在九家一起摊开，
+  // 因为「选哪家」已经不是设置页的职责了。
+  const groups: [string, string[]][] = GROUPS[activeSection] ?? []
+
+  /**
+   * 当前选中那家厂商要填哪些栏。
+   *
+   * 内置九家只有一栏（key）—— 它们的 baseUrl 是常量，模型清单在 vendors.ts 里。
+   * 自定义端点要四栏：地址、key、模型清单、搜索工具 —— 我们对它一无所知，
+   * 全靠用户告诉我们。
+   */
+  const vendorFields: string[] =
+    formVendor === CUSTOM_ID ? [...CUSTOM_KEYS] : [findVendor(formVendor)?.keyEnv ?? ''].filter(Boolean)
+
+  /**
+   * 一行字段。两处共用：厂商凭据卡 / 高级参数卡，以及下面按 GROUPS 渲染的
+   * 那些分区。抽出来是因为这两处的行内容完全一样，复制一份迟早分叉
+   * （比如密码框的判断只改了一处）。
+   *
+   * `divider` 控制上边框 —— 卡片里第一行不要，后续行要。
+   */
+  const renderField = (key: string, divider: boolean) => {
+    const isRestartField = (RESTART_REQUIRED as readonly string[]).includes(key)
+    const isBooleanField = key === 'STREAM' || key === 'LLM_CACHE'
+    const isSecret = key.endsWith('_API_KEY')
+    const text = label(key)
+    const h = hint(key)
+    return (
+      <div
+        key={key}
+        // items-start 而不是 center：左列可能有三行（标题 + 键名 + 说明），
+        // 居中会让输入框飘到中间、跟标题对不上
+        className={`flex items-start gap-4 py-3 ${divider ? 'border-t border-line' : ''}`}
+      >
+        <label htmlFor={`setting-${key}`} className="field flex min-w-0 flex-1 flex-col gap-[3px]">
+          <span className="flex items-center gap-1">
+            <span className="text-[12.5px] font-medium text-ink">{text || key}</span>
+            {REQUIRED.includes(key) && <span className="text-[12.5px] text-red">*</span>}
+          </span>
+          {/* 键名给「想手改 settings.json 的人」看，不该跟标题抢注意力。
+              label 兜底成空串时标题已经是键名了，这里就不重复一遍 */}
+          {text && <span className="font-mono text-[11px] text-ink-3">{key}</span>}
+          {h && <span className="text-[11.5px] text-ink-3">{h}</span>}
+        </label>
+        {/* 输入框定宽而不是 flex-1：所有输入框右边缘要对齐，
+            flex-1 会让它随左列文字长短伸缩、宽度参差不齐 */}
+        <input
+          id={`setting-${key}`}
+          aria-label={key}
+          aria-describedby={needsRestart && isRestartField ? 'restart-warning' : undefined}
+          type={isSecret ? 'password' : 'text'}
+          value={draft[key] ?? ''}
+          onChange={(e) => persistField(key, e.target.value, isBooleanField)}
+          className="h-7 w-[300px] flex-none rounded-control bg-field px-2.5 font-[inherit] text-[13px] text-ink shadow-inset-field placeholder:text-ink-3 focus:outline-2 focus:outline-offset-[-1px] focus:outline-accent"
+        />
+      </div>
+    )
+  }
+
+  // 「已配几家」是唯一能表达「至少配一家才能对话」这条要求的地方 ——
+  // 它不是任何单个字段的属性，所以不能用必填星号表达（那会在九家里每家都
+  // 标一个红星，而且是错的，填一家就够）。
+  const get = (key: string) => draft[key]
+  const configuredNames = [...ALL.map((v) => v.id), CUSTOM_ID]
+    .filter((id) => isConfigured(id, get))
+    .map((id) => nameOf(id) ?? '')
+    .filter(Boolean)
+
+  // 这一页的标题。以前是顶栏里一个固定的「设置」，那条顶栏现在没了 ——
+  // 「我在设置里」由左栏的导航说，而顶栏再重复一次「设置」两个字，占掉
+  // 44px 却没说出用户不知道的事。换成当前分区名：那是这一屏真正的标题。
+  const sectionLabel = SECTIONS.find((s) => s.id === activeSection)?.label ?? ''
+
   return (
-    // settings 保留作测试锚点。
-    // 以前这里是 fixed inset-0 的浮层（盖在主窗口上）；现在面板是独立
-    // BrowserWindow 的内容，所以改成撑满自己那个窗口：h-full + flex-1
-    // 贴着 #root 的 flex h-screen。fixed 在这里已经没有意义 ——
-    // 没有别的东西要被它盖住了。
+    // 整个内容区就是这一栏（左边是 SettingsNav）。没有内层导航、没有顶栏。
     <div className="settings flex h-full min-w-0 flex-1 flex-col bg-canvas">
-      {/* pl-20（80px）是给 macOS 红绿灯让的位：hiddenInset 保留那三个圆点，
-          它们连按钮带边距占左上角约 78px。整条 header 是拖拽区（设置窗口同样
-          没有原生标题栏），右边的关闭按钮单独标 no-drag，否则点不动。 */}
-      <header className="flex h-11 items-center justify-between border-b border-line py-2 pr-4 pl-20 [-webkit-app-region:drag]">
-        <h2 className="m-0 text-[13px] font-semibold">设置</h2>
-        <button
-          aria-label="关闭"
-          onClick={onClose}
-          className="flex h-6 w-6 cursor-pointer items-center justify-center rounded-chip border-none bg-transparent text-ink-2 hover:bg-hover [-webkit-app-region:no-drag]"
-        >
-          <Icon name="close" size={13} />
-        </button>
-      </header>
-
       <div className="flex min-h-0 flex-1">
-        {/* 左：分组导航。以前是 w-56（224px）去对齐主窗口的侧边栏，但面板
-            现在住在自己那个 ~700px 宽的窗口里，224px 的导航会把字段区挤窄；
-            四个分组名都很短，w-40 够用。 */}
-        <nav className="settings__nav flex w-40 flex-none flex-col border-r border-line p-2">
-          <div className="flex flex-col gap-px">
-            {SECTIONS.map((section) => {
-              const isActive = section.id === activeSection
-              return (
-                <button
-                  key={section.id}
-                  type="button"
-                  className={`settings__nav-item flex h-7 items-center rounded-control px-2.5 text-left text-[12.5px] transition-colors duration-150 ${
-                    isActive ? 'bg-surface font-medium text-ink' : 'text-ink-2 hover:bg-hover'
-                  }`}
-                  onClick={() => setActiveSection(section.id)}
-                >
-                  {section.label}
-                </button>
-              )
-            })}
-          </div>
-        </nav>
-
-        {/* 右：当前分组的字段 + 横跨所有分组的错误/重启提示 */}
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="flex flex-1 flex-col gap-2.5 overflow-y-auto px-4 py-4">
+          {/* 内容限宽 760 并居中。比对话区的 720 宽一点 —— 表单是两列
+              （标签 + 输入框），挤在 720 里输入框会太窄。760 取自 waku 的
+              SETTINGS_CONTENT_MAX_WIDTH，gpui 侧同一个数。
+              不限宽的话在宽窗口上标签贴左、输入框贴右，中间一片空白。 */}
+          <div className="mx-auto flex w-full max-w-[760px] flex-1 flex-col gap-[18px] overflow-y-auto px-6 py-5">
+            {/* 页标题。红绿灯在左栏那边，这里不用留位，但顶上仍要一条可拖拽区
+                ——否则窗口顶部这一整条只能靠左栏那 224px 拖动。 */}
+            <div className="flex flex-none items-center [-webkit-app-region:drag]">
+              <h2 className="m-0 text-[15px] font-semibold text-ink">{sectionLabel}</h2>
+            </div>
+            {/* --- 凭据页：已配几家 + 探测到的本机配置 ---
+                这里没有厂商选择器。「用哪家、哪个模型」由 composer 左下角的
+                选择器决定（ModelPicker.tsx）—— 那是提问的时刻，也是这个信息
+                唯一该出现的地方。设置页只管一件事：把手上有的 key 填进去。 */}
+            {/* --- 凭据页 ---
+                ## 这个 select 选的不是「谁答我的问题」
+                
+                它只决定**这张表单现在填哪家的 key**（表单作用域），不写
+                ACTIVE_VENDOR。「下一条消息谁来答」由 composer 左下角那个
+                选择器决定 —— 那是提问的时刻，也是那个信息唯一该出现的地方。
+                
+                两者混用会让同一个事实有两个来源，而它们迟早不一致（上一版
+                就是那样，撞出过 {厂商:anthropic, 模型:deepseek-reasoner}
+                这种脏组合）。所以这里刻意用**组件内 state**，不落盘。
+                
+                为什么不像上一版那样九家一起摊开：九个 key 输入框里八个永远
+                是空的，用户要在一屏长表单里找自己那一家。选一家、填一栏，
+                比滚动九栏快。 */}
             {activeSection === 'provider' && (
-              <>
+              <div className="flex flex-col gap-3.5">
+                <div
+                  className={`text-[11.5px] ${configuredNames.length === 0 ? 'text-orange' : 'text-ink-3'}`}
+                >
+                  {configuredNames.length === 0
+                    ? '还没配任何 key。选一家填上，或者用自定义端点指向本地 / 第三方服务。'
+                    : `已配 ${configuredNames.length} 项：${configuredNames.join('、')}`}
+                </div>
+
+                {/* 厂商选择 + 那一家的凭据栏 */}
+                <div className="flex flex-col rounded-[12px] border border-line-strong bg-surface px-4 py-1">
+                  <div className="flex h-[34px] flex-none items-center text-[11px] font-semibold text-ink-3">
+                    厂商凭据
+                  </div>
+
+                  <div className="flex items-start gap-4 py-3">
+                    <label htmlFor="vendor-select" className="field flex min-w-0 flex-1 flex-col gap-[3px]">
+                      <span className="text-[12.5px] font-medium text-ink">厂商</span>
+                      <span className="text-[11.5px] text-ink-3">
+                        选一家，下面填它的凭据。这里只决定填哪家的 key —— 用哪家答话在对话框左下角选。
+                      </span>
+                    </label>
+                    <select
+                      id="vendor-select"
+                      aria-label="厂商"
+                      value={formVendor}
+                      onChange={(e) => setFormVendor(e.target.value)}
+                      className="h-7 w-[300px] flex-none rounded-control bg-field px-2 font-[inherit] text-[13px] text-ink shadow-inset-field focus:outline-2 focus:outline-offset-[-1px] focus:outline-accent"
+                    >
+                      {ALL.map((v) => (
+                        <option key={v.id} value={v.id}>
+                          {v.name}
+                          {isConfigured(v.id, get) ? ' ✓' : ''}
+                        </option>
+                      ))}
+                      {/* 自定义端点放最后：它不是「一家厂商」，而是「其它任何
+                          OpenAI 兼容的地址」，语义上是兜底项 */}
+                      <option value={CUSTOM_ID}>
+                        {CUSTOM_NAME}
+                        {isConfigured(CUSTOM_ID, get) ? ' ✓' : ''}
+                      </option>
+                    </select>
+                  </div>
+
+                  {/* 选中那一家的字段。自定义端点要多填几栏（地址、模型清单、
+                      搜索工具）—— 内置九家的地址是常量，没得填。 */}
+                  {vendorFields.map((key) => renderField(key, true))}
+                </div>
+
+                {/* 高级参数：默认收起。
+                    绝大多数人一辈子不需要动温度，而它摆在 key 旁边会让「配置
+                    模型」看起来比实际复杂 —— 用户以为这些都得填。 */}
+                <div className="flex flex-col rounded-[12px] border border-line-strong bg-surface px-4 py-1">
+                  <div className="flex h-[42px] flex-none items-center justify-between gap-3">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-[12.5px] font-medium text-ink">高级参数</span>
+                      <span className="text-[11px] text-ink-3">
+                        采样行为。不确定就别动 —— 默认值适合调工具的场景。
+                      </span>
+                    </div>
+                    {/* 原生 checkbox + role=switch：可访问性上它就是个开关，
+                        而自绘一个 div 要自己补键盘操作和焦点环 */}
+                    <button
+                      type="button"
+                      role="switch"
+                      aria-checked={showAdvanced}
+                      aria-label="高级参数"
+                      onClick={() => setShowAdvanced((v) => !v)}
+                      className={`relative flex h-[18px] w-[32px] flex-none cursor-pointer items-center rounded-full border-none px-0.5 transition-colors duration-150 ${
+                        showAdvanced ? 'bg-accent' : 'bg-field'
+                      }`}
+                    >
+                      <span
+                        className={`block size-[14px] rounded-full bg-page transition-transform duration-150 ${
+                          showAdvanced ? 'translate-x-[14px]' : 'translate-x-0'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                  {showAdvanced && (
+                    <div className="flex flex-col border-t border-line">
+                      {ADVANCED_MODEL_KEYS.map((key) => renderField(key, false))}
+                    </div>
+                  )}
+                </div>
+
                 {/* 探测到的本机配置 */}
                 {detections.length > 0 && (
-                  <div className="flex flex-col gap-2 pb-3 border-b border-line">
+                  <div className="flex flex-col gap-2">
                     <h3 className="m-0 text-[12px] font-semibold text-ink-2">检测到的配置</h3>
                     {detections.map((d) => {
-                      const providerLabel = d.provider === 'claude' ? 'Claude Code' : d.provider === 'codex' ? 'Codex' : 'Gemini'
+                      const providerLabel =
+                        d.provider === 'claude' ? 'Claude Code' : d.provider === 'codex' ? 'Codex' : 'Gemini'
                       const canImport = d.available && (d.provider === 'claude' || d.provider === 'codex')
                       const isImporting = importing === d.provider
-
                       return (
-                        <div key={d.provider} className="flex items-start gap-2 rounded-card bg-surface px-3 py-2 shadow-hairline">
+                        <div
+                          key={d.provider}
+                          className="flex items-start gap-2 rounded-card bg-surface px-3 py-2 shadow-hairline"
+                        >
                           <div className="flex-1">
                             <div className="text-[12.5px] font-medium text-ink">{providerLabel}</div>
                             {d.model && <div className="text-[11.5px] text-ink-3">模型：{d.model}</div>}
@@ -217,38 +383,82 @@ export function SettingsPanel({
                     })}
                   </div>
                 )}
-
-                {/* BYOK：手动填写字段 */}
-                <h3 className="m-0 text-[12px] font-semibold text-ink-2">手动配置（BYOK）</h3>
-              </>
+              </div>
             )}
 
-            {activeKeys.map((key) => {
-              const isRestartField = RESTART_REQUIRED.includes(key as typeof RESTART_REQUIRED[number])
-              const fieldId = `setting-${key}`
-              const isBooleanField = key === 'STREAM' || key === 'LLM_CACHE'
+            {activeSection === 'agents' && (
+              <div className="flex flex-col gap-3.5">
+                <div className="text-[12.5px] text-ink-2">
+                  「这一轮由谁来跑」。内置 agent 是本仓库实现的 ReAct 循环；外部 CLI
+                  走 ACP 标准协议，模型逻辑在它自己的进程里。每个会话各记各的 ——
+                  在 composer 左下角切换。
+                </div>
 
-              return (
-                <label key={key} className="field flex flex-col gap-1">
-                  <span className="font-mono text-[11.5px] text-ink-2">{key}</span>
-                  <input
-                    id={fieldId}
-                    aria-label={key}
-                    aria-describedby={needsRestart && isRestartField ? 'restart-warning' : undefined}
-                    type={key === 'DEEPSEEK_API_KEY' ? 'password' : 'text'}
-                    value={draft[key] ?? ''}
-                    onChange={(e) => persistField(key, e.target.value, isBooleanField)}
-                    className="h-7 rounded-control bg-field px-2.5 font-[inherit] text-[13px] text-ink shadow-inset-field placeholder:text-ink-3 focus:outline-2 focus:outline-offset-[-1px] focus:outline-accent"
-                  />
-                  {HINTS[key] && <span className="text-[11.5px] text-ink-3">{HINTS[key]}</span>}
-                </label>
-              )
-            })}
+                {providers?.options.map((o) => {
+                  const isCurrent = o.id === providers.current
+                  return (
+                    <div
+                      key={o.id}
+                      className="flex items-center gap-2 rounded-card border border-line bg-surface p-3"
+                    >
+                      <Icon name={o.external ? 'terminal' : 'bot'} size={14} />
+                      <div className="flex flex-1 flex-col gap-0.5">
+                        <div className="text-[12.5px] font-medium text-ink">{o.name}</div>
+                        <div className="text-[11.5px] text-ink-3">
+                          {o.external
+                            ? '外部 CLI，走 ACP 协议。工具和权限由它自己管。'
+                            : '本仓库实现的 ReAct 循环。工具走 MCP，历史存本地。'}
+                        </div>
+                      </div>
+                      {isCurrent && (
+                        <span className="rounded-full bg-accent-tint px-2 py-px text-[11px] text-accent-ink">
+                          当前会话
+                        </span>
+                      )}
+                    </div>
+                  )
+                })}
+
+                {/* 这一页**不做成表单**：外部 CLI 的配置（命令、参数、环境变量）
+                    是从各家 README 粘过来的，表单会强迫用户把一行命令拆成
+                    几个输入框。给出文件路径，让他直接改那份 JSON。 */}
+                <div className="flex flex-col gap-1.5 rounded-card border border-line bg-surface p-3">
+                  <div className="text-[12.5px] font-medium text-ink">加一个外部 CLI</div>
+                  <div className="text-[11.5px] text-ink-3">
+                    改这个文件，然后重启应用。预置了 Claude Code、Codex、Gemini CLI、Pi、
+                    DeepSeek Harness 五家，默认都是关着的（它们要 npx 拉包、还要各自登录）——
+                    把想用的那家 <code className="font-mono">disabled</code> 去掉即可。
+                  </div>
+                  {providers?.configPath && (
+                    <div className="mt-1 font-mono text-[11px] break-all text-ink-3">
+                      {providers.configPath}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* --- 表单字段：每组一张卡片 --- */}
+            {groups.map(([groupName, keys]) => (
+              <div
+                key={groupName}
+                className="flex flex-col rounded-[12px] border border-line-strong bg-surface px-4 py-1"
+              >
+                {/* 卡片头：小号、灰、加粗 */}
+                <div className="flex h-[34px] flex-none items-center text-[11px] font-semibold text-ink-3">
+                  {groupName}
+                </div>
+                <div className="flex flex-col">
+                  {/* field 类名等细节都在 renderField 里 —— 这一处和上面
+                      厂商凭据卡共用同一个实现，复制一份迟早分叉 */}
+                  {keys.map((key, i) => renderField(key, i > 0))}
+                </div>
+              </div>
+            ))}
           </div>
 
           {(error || needsRestart) && (
             <div className="flex flex-col gap-2.5 border-t border-line px-4 py-3">
-              {/* 显示验证错误 */}
               {error && (
                 <div
                   className="settings__error m-0 rounded-card bg-red-tint px-2.5 py-1.5 text-[12.5px] text-red shadow-hairline"
@@ -258,8 +468,6 @@ export function SettingsPanel({
                   {error}
                 </div>
               )}
-
-              {/* 改笔记目录或 embedding 模型时显示警告 + 重启按钮 */}
               {needsRestart && (
                 <div
                   className="settings__warn m-0 rounded-card bg-orange-tint px-2.5 py-1.5 text-[12.5px] text-orange shadow-hairline"
@@ -281,10 +489,6 @@ export function SettingsPanel({
           )}
         </div>
       </div>
-
-      {/* 这里以前有个只放一句「API Key 以明文存储」的 footer。改完即生效之后
-          它不再承载任何操作，只是白占一条高度，撤掉；那句披露挪进了
-          DEEPSEEK_API_KEY 的 hint（见文件顶部 HINTS）。 */}
     </div>
   )
 }

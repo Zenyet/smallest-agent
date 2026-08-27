@@ -59,6 +59,24 @@ export function ContextMenu({
   // popover 是命令式 API（showPopover/hidePopover），要跟 React 的声明式
   // 状态对上就得在 effect 里同步。直接在 JSX 上写 open 属性不行 ——
   // popover 没有那个属性。
+  //
+  // ## 为什么是 popover="manual" 而不是 "auto"
+  //
+  // auto 的 light dismiss 会让右键菜单**一弹出来就自己关掉**。
+  //
+  // light dismiss 是 pointerdown / pointerup 配对判定的：pointerdown 那一刻
+  // 记下「按在哪个浮层里」，pointerup 时把不在其中的浮层关掉。而右键的事件
+  // 顺序是 pointerdown → contextmenu → pointerup ——
+  //
+  //   1. pointerdown：菜单还没开，记为「按在所有浮层之外」
+  //   2. contextmenu：我们在这里 showPopover()
+  //   3. pointerup：判定「刚才按在外面」→ 立刻关掉
+  //
+  // 用户看到的就是菜单闪一下没了。ModelPicker 用 auto 没事正好反证这一点：
+  // 它是 click 打开的，而 click 在 pointerup **之后**。
+  //
+  // 代价是点外面关闭和 Esc 关闭都得自己接：点外面在下面那个 effect，
+  // Esc 在 onKeyDown 里。
   useEffect(() => {
     const el = ref.current
     if (!el) return
@@ -66,17 +84,38 @@ export function ContextMenu({
       // 已经开着时再 show 会抛 InvalidStateError（同一个会话里连着右键
       // 两行就会遇到），所以先查状态
       if (!el.matches(':popover-open')) el.showPopover()
-      // 开的时候把焦点收进来：Esc 的 light dismiss 不需要焦点，
-      // 但方向键遍历需要
+      // 开的时候把焦点收进来。方向键遍历需要，Esc 也需要 ——
+      // manual popover 没有内置的 Esc 关闭，是 onKeyDown 自己接的，
+      // 那个 handler 只在焦点落在菜单里时才收得到按键。
       el.focus()
     } else if (el.matches(':popover-open')) {
       el.hidePopover()
     }
   }, [state.at])
 
-  // 平台的 light dismiss（点外面 / Esc）会自己关掉 popover，但它只改 DOM，
-  // 不会通知 React —— 不听这个事件的话 state.at 还留着旧坐标，下次右键
-  // 同一行时 effect 看不出变化，菜单就不再弹出。
+  // 点外面关掉。manual popover 不自带（那是 auto 的 light dismiss 给的，
+  // 而 auto 会把菜单一开就关，见上面）。
+  //
+  // 听 pointerdown 而不是 click：按下就该关，跟系统菜单一致；也避开了
+  // 「按下时菜单还在、松手时已经不在」那类错位。这个 effect 是在 contextmenu
+  // 处理完之后才挂上的，右键自己那次 pointerdown 早过去了，不会自摆一道。
+  useEffect(() => {
+    if (!state.at) return
+    const onPointerDown = (e: PointerEvent) => {
+      const el = ref.current
+      if (!el) return
+      // 按在菜单里面不关 —— 那是在选一项，关闭由 onSelect 负责
+      if (e.composedPath().includes(el)) return
+      onClose()
+    }
+    // capture 阶段：中途有人 stopPropagation 的话冒泡阶段就收不到了
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => document.removeEventListener('pointerdown', onPointerDown, true)
+  }, [state.at, onClose])
+
+  // popover 被平台自己关掉时（比如别处 hidePopover、或者元素被移出 top layer）
+  // 只改了 DOM，不会通知 React —— 不听这个事件的话 state.at 还留着旧坐标，
+  // 下次右键同一行时 effect 看不出变化，菜单就不再弹出。
   useEffect(() => {
     const el = ref.current
     if (!el) return
@@ -88,7 +127,12 @@ export function ContextMenu({
   }, [onClose])
 
   const onKeyDown = (e: React.KeyboardEvent) => {
-    // Esc 不用管，popover 的 light dismiss 已经接了
+    // Esc 得自己接：manual popover 没有内置的 Esc 关闭
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      onClose()
+      return
+    }
     if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return
     e.preventDefault()
     const el = ref.current
@@ -111,17 +155,25 @@ export function ContextMenu({
   return (
     <div
       ref={ref}
-      popover="auto"
+      popover="manual"
       role="menu"
       tabIndex={-1}
       onKeyDown={onKeyDown}
       // 定位：popover 默认居中在视口，要用 left/top 挪到光标处。
-      // margin:0 是必须的 —— UA 样式给 [popover] 加了 auto margin，
-      // 不清掉的话它会被推离指定坐标。
+      //
+      // margin:0 和 right/bottom:auto 都是必须的，两个都在对付 UA 样式里的
+      // `[popover] { inset: 0; margin: auto; width/height: fit-content }`：
+      //   - auto margin 会把它推离指定坐标
+      //   - 留着 inset 的 right/bottom:0 就是过约束（左右都定、宽度又是
+      //     fit-content），CSS 会丢掉一边。这里丢的正好是 right/bottom，
+      //     所以只写 left/top 也能对 —— 但那是碰巧，写反了就悄悄不生效
+      //     （ModelPicker 就是这么中招的：它设 bottom，被丢掉的正是 bottom）。
       style={{
         margin: 0,
         left: state.at ? `${state.at.x}px` : undefined,
         top: state.at ? `${state.at.y}px` : undefined,
+        right: 'auto',
+        bottom: 'auto',
       }}
       // 容器规格照 context_menu.rs：min-w 150、p-1(4px)、rounded-card(10px)、
       // bg-overlay、1px line-strong 边。

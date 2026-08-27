@@ -20,6 +20,7 @@ import type {
   CancelledEvent,
   ProviderDetection,
   ProviderSecret,
+  ProvidersView,
 } from '../shared/channels'
 
 // 事件订阅统一包成「注册回调 → 返回取消函数」，React 的 useEffect 直接 return 它就能清理。
@@ -40,10 +41,6 @@ const api = {
   saveSettings: (patch: DesktopSettings): Promise<DesktopSettings> =>
     ipcRenderer.invoke(CH.saveSettings, patch),
   restartApp: (): Promise<void> => ipcRenderer.invoke(CH.restartApp),
-  // 打开设置窗口（独立 BrowserWindow）。单例由主进程保证：已经开着就聚焦，
-  // 连点两次不会开出第二个。
-  openSettings: (): Promise<void> => ipcRenderer.invoke(CH.openSettings),
-
   listSessions: (): Promise<SessionMeta[]> => ipcRenderer.invoke(CH.listSessions),
   // projectId：新会话落在哪个项目下。不传/传 null 就是「未分组」。
   createSession: (projectId?: string | null): Promise<string> =>
@@ -69,6 +66,11 @@ const api = {
   // 空标题 = 恢复自动推导的名字。返回写完之后的完整表。
   renameSession: (id: string, title: string): Promise<Record<string, string>> =>
     ipcRenderer.invoke(CH.renameSession, id, title),
+  // 编辑重发前砍历史。nthUser 是「这条之前有几条用户消息」（0-based）——
+  // 磁盘和界面的下标不是一一对应的，见 main/truncate.ts。
+  // 返回砍完之后的历史，renderer 拿它重放界面，不自己推算。
+  truncateSession: (id: string, nthUser: number): Promise<Message[]> =>
+    ipcRenderer.invoke(CH.truncateSession, id, nthUser),
   assignSession: (sessionId: string, projectId: string | null): Promise<ProjectsState> =>
     ipcRenderer.invoke(CH.assignSession, sessionId, projectId),
   toggleProjectCollapsed: (id: string): Promise<ProjectsState> =>
@@ -76,6 +78,17 @@ const api = {
 
   respondApproval: (requestId: string, decision: ApprovalDecision): Promise<void> =>
     ipcRenderer.invoke(CH.approvalResponse, requestId, decision),
+
+  // --- Agent 模式（内置 agent / 外部 CLI）---
+  // 写操作返回写完之后的完整视图，renderer 不自己推算下一个状态。
+  getProviders: (sessionId: string): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.getProviders, sessionId),
+  setSessionProvider: (sessionId: string, providerId: string): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.setSessionProvider, sessionId, providerId),
+  setSessionModel: (sessionId: string, modelId: string): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.setSessionModel, sessionId, modelId),
+  setSessionPermission: (sessionId: string, mode: string): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.setSessionPermission, sessionId, mode),
 
   // Provider detection（两段式）
   detectProviders: (): Promise<ProviderDetection[]> => ipcRenderer.invoke(CH.detectProviders),
@@ -99,8 +112,11 @@ const api = {
   onApprovalRequest: (cb: (d: ApprovalRequestEvent) => void) => subscribe(CH.approvalRequest, cb),
   // 主进程广播的两条：设置和项目状态。两个窗口之后单靠 invoke 的返回值不够——
   // 那只回给发起调用的那个窗口，另一个窗口手里的副本会悄悄变成死的。
+  // 原生菜单的 ⌘, 打过来的。设置在右栏渲染，主进程只负责喊一声。
+  onOpenSettings: (cb: () => void) => subscribe<void>(CH.openSettings, cb),
   onSettingsChanged: (cb: (d: DesktopSettings) => void) => subscribe(CH.settingsChanged, cb),
   onProjectsChanged: (cb: (d: ProjectsState) => void) => subscribe(CH.projectsChanged, cb),
+  onProvidersChanged: (cb: (d: ProvidersView) => void) => subscribe(CH.providersChanged, cb),
 }
 
 contextBridge.exposeInMainWorld('electronAPI', api)

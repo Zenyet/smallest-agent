@@ -165,6 +165,89 @@ describe('ContextMenu', () => {
     expect(document.activeElement).toBe(screen.getAllByRole('menuitem', { hidden: true })[1])
   })
 
+  // ## 下面五条锁的是「菜单一弹出来就自己关掉」那个 bug
+  //
+  // 根因：popover="auto" 的 light dismiss 是 pointerdown / pointerup 配对判定
+  // 的 —— pointerdown 记下「按在哪个浮层里」，pointerup 时关掉不在其中的。
+  // 而右键的事件顺序是 pointerdown → contextmenu → pointerup：
+  //
+  //   1. pointerdown —— 菜单还没开，记为「按在所有浮层之外」
+  //   2. contextmenu —— 组件在这里 showPopover()
+  //   3. pointerup   —— 判定「刚才按在外面」→ 立刻关掉
+  //
+  // 用户看到菜单闪一下就没了。修法是改成 manual，自己接点外面和 Esc。
+  //
+  // light dismiss 本身是平台行为，jsdom 里验不了（桩只维持开关状态）。所以这里
+  // 测的是「修法还在不在」：属性是 manual、两个替代手势都接上了。
+
+  it('用 popover="manual" —— auto 的 light dismiss 会让右键菜单一开就关', () => {
+    const { container } = render(
+      <ContextMenu state={{ at, items: [{ label: 'a', onSelect: () => {} }] }} onClose={() => {}} />,
+    )
+    expect(container.querySelector('[role="menu"]')!.getAttribute('popover')).toBe('manual')
+  })
+
+  it('点菜单外面关闭（manual 不自带，得自己接）', () => {
+    let closed = 0
+    render(
+      <ContextMenu
+        state={{ at, items: [{ label: 'a', onSelect: () => {} }] }}
+        onClose={() => closed++}
+      />,
+    )
+    fireEvent.pointerDown(document.body)
+    expect(closed).toBe(1)
+  })
+
+  it('点菜单里面不关闭 —— 那是在选一项，关闭由 onSelect 负责', () => {
+    let closed = 0
+    render(
+      <ContextMenu
+        state={{ at, items: [{ label: 'a', onSelect: () => {} }] }}
+        onClose={() => closed++}
+      />,
+    )
+    fireEvent.pointerDown(screen.getByRole('menu', { hidden: true }))
+    expect(closed).toBe(0)
+  })
+
+  it('Esc 关闭（manual 没有内置的 Esc 关闭）', () => {
+    let closed = 0
+    render(
+      <ContextMenu
+        state={{ at, items: [{ label: 'a', onSelect: () => {} }] }}
+        onClose={() => closed++}
+      />,
+    )
+    fireEvent.keyDown(screen.getByRole('menu', { hidden: true }), { key: 'Escape' })
+    expect(closed).toBe(1)
+  })
+
+  // 菜单没开时不该还挂着全局监听 —— 那会把别处的点击吃成一次 onClose
+  it('没开时点外面不触发 onClose', () => {
+    let closed = 0
+    render(<ContextMenu state={CLOSED} onClose={() => closed++} />)
+    fireEvent.pointerDown(document.body)
+    expect(closed).toBe(0)
+  })
+
+  // UA 样式是 `[popover] { inset: 0; margin: auto; width: fit-content }`。
+  // 左右都定住、宽度又是 fit-content 就是过约束，CSS 会丢掉一边 —— 这里丢的
+  // 恰好是 right/bottom，所以只写 left/top 也能对，但那是碰巧。
+  // 显式让开，免得哪天改成从右边或下边定位时悄悄失效（ModelPicker 就是这么
+  // 中招的：它设 bottom，而 bottom 正是被丢掉的那个）。
+  it('让开 UA 默认的 inset：margin 归零，right/bottom 显式 auto', () => {
+    render(
+      <ContextMenu state={{ at, items: [{ label: 'a', onSelect: () => {} }] }} onClose={() => {}} />,
+    )
+    const el = screen.getByRole('menu', { hidden: true }) as HTMLElement
+    expect(el.style.left).toBe('10px')
+    expect(el.style.top).toBe('20px')
+    expect(el.style.margin).toBe('0px')
+    expect(el.style.right).toBe('auto')
+    expect(el.style.bottom).toBe('auto')
+  })
+
   // 换掉原生菜单丢了 VoiceOver 对系统菜单的原生支持，role 语义是补偿。
   // 掉了就等于既没有原生支持、也没有 ARIA。
   it('带 menu / menuitem 语义', () => {

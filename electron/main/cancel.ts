@@ -74,10 +74,49 @@ export class Cancelled extends Error {
  */
 export class CancelToken {
   #cancelled = false
+  /**
+   * 取消发生时要叫醒的人。
+   *
+   * ## 为什么光有 isCancelled() 不够
+   *
+   * 内置 agent 是「每轮入口查一次」，轮询就够。但 ACP provider 那边不一样：
+   * 它阻塞在 `await session.nextUpdate()` 上等子进程说话。用户点停止时，
+   * 如果那个 CLI 正好在闷头干活（不发通知），轮询要等到它下次开口才生效 ——
+   * 而「正在跑长工具」恰恰是最想停下来的时刻。
+   *
+   * 所以给一条主动通路：取消发生时立刻回调，ACP 那边在回调里发
+   * `session/cancel` 通知，不用等下一条更新。
+   */
+  #listeners = new Set<() => void>()
 
   /** 请求取消。多次调用无害。 */
   cancel(): void {
+    if (this.#cancelled) return
     this.#cancelled = true
+    for (const cb of this.#listeners) {
+      // 一个监听者抛错不该拦住其它的 —— 它们各自独立
+      try {
+        cb()
+      } catch (err) {
+        console.error('[cancel] 监听者抛错：', err)
+      }
+    }
+    // 只叫一次，之后不再需要它们
+    this.#listeners.clear()
+  }
+
+  /**
+   * 订阅取消。返回退订函数。
+   *
+   * 已经取消了就**立刻**同步回调 —— 否则「订阅晚了一步」会静默丢掉这次取消。
+   */
+  onCancel(cb: () => void): () => void {
+    if (this.#cancelled) {
+      cb()
+      return () => {}
+    }
+    this.#listeners.add(cb)
+    return () => this.#listeners.delete(cb)
   }
 
   isCancelled(): boolean {

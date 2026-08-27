@@ -141,6 +141,144 @@ describe('MessageBubble', () => {
     render(<MessageBubble message={msg({ cacheHit: true })} />)
     expect(screen.getByText(/缓存命中/)).toBeTruthy()
   })
+
+  // ## 这一条锁的是「气泡底部空了一块」
+  //
+  // 徽章行原来是无条件渲染的，于是绝大多数消息（既没缓存命中、也没核查结论）
+  // 在正文下面挂着一个带 mt-1.5 的空 flex 盒子 —— 白占一截高度。
+  it('没有徽章时不渲染徽章行（空容器会让气泡底部白空一块）', () => {
+    const { container } = render(<MessageBubble message={msg()} />)
+    expect(container.querySelector('.bubble__badges')).toBeNull()
+  })
+
+  it('有徽章时才渲染徽章行', () => {
+    const { container } = render(<MessageBubble message={msg({ cacheHit: true })} />)
+    expect(container.querySelector('.bubble__badges')).toBeTruthy()
+  })
+
+  // 操作栏是气泡的**兄弟**，不在气泡内部 —— 在里面的话气泡的 py-2 会在它
+  // 下面再垫一层 padding（「底部像空了」的另一半原因）。gpui 侧也是气泡下面
+  // 那一行，见 chat.rs 的 render_message_actions。
+  it('操作栏在气泡外面，不在气泡内部', () => {
+    const { container } = render(<MessageBubble message={msg()} />)
+    const bubble = container.querySelector('.bubble')!
+    expect(bubble.querySelector('[aria-label="复制"]')).toBeNull()
+    expect(container.querySelector('[aria-label="复制"]')).toBeTruthy()
+  })
+
+  // --- 编辑重发 ---
+  //
+  // 编辑只给用户消息：改模型说过的话没有意义 —— 它不是「我想说的」，
+  // 改了也不会让模型重新想。
+
+  it('用户消息有编辑按钮', () => {
+    render(<MessageBubble message={msg({ role: 'user' })} onEditResend={() => {}} canEdit />)
+    expect(screen.getByLabelText('编辑')).toBeTruthy()
+  })
+
+  it('助手消息没有编辑按钮', () => {
+    render(<MessageBubble message={msg()} onEditResend={() => {}} canEdit />)
+    expect(screen.queryByLabelText('编辑')).toBeNull()
+  })
+
+  // 正在跑的时候那一轮还在往 messages 里写，之后的截断会和它打架
+  it('正在跑时不给编辑入口', () => {
+    render(
+      <MessageBubble message={msg({ role: 'user' })} onEditResend={() => {}} canEdit={false} />,
+    )
+    expect(screen.queryByLabelText('编辑')).toBeNull()
+  })
+
+  it('没有 onEditResend 时不给编辑入口（只读场景）', () => {
+    render(<MessageBubble message={msg({ role: 'user' })} canEdit />)
+    expect(screen.queryByLabelText('编辑')).toBeNull()
+  })
+
+  // 气泡**原地**变输入框，而不是把内容塞回底部 composer —— 后者会让用户
+  // 失去「我在改哪一条」的位置感（历史长、那条已滚出视口时尤其明显）
+  it('点编辑后气泡原地变成输入框，带原内容', () => {
+    render(
+      <MessageBubble message={msg({ role: 'user', content: '原问题' })} onEditResend={() => {}} canEdit />,
+    )
+    fireEvent.click(screen.getByLabelText('编辑'))
+    const box = screen.getByLabelText('编辑消息') as HTMLTextAreaElement
+    expect(box.value).toBe('原问题')
+  })
+
+  it('编辑态下不显示复制/编辑，改成取消/发送', () => {
+    render(<MessageBubble message={msg({ role: 'user' })} onEditResend={() => {}} canEdit />)
+    fireEvent.click(screen.getByLabelText('编辑'))
+    expect(screen.queryByLabelText('复制')).toBeNull()
+    expect(screen.queryByLabelText('编辑')).toBeNull()
+    expect(screen.getByRole('button', { name: '取消' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: '发送' })).toBeTruthy()
+  })
+
+  it('点发送交出新内容', () => {
+    const sent: string[] = []
+    render(
+      <MessageBubble
+        message={msg({ role: 'user', content: '旧' })}
+        onEditResend={(t) => sent.push(t)}
+        canEdit
+      />,
+    )
+    fireEvent.click(screen.getByLabelText('编辑'))
+    fireEvent.change(screen.getByLabelText('编辑消息'), { target: { value: '新问题' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(sent).toEqual(['新问题'])
+  })
+
+  it('回车发送、Shift+回车不发送（和 composer 同一套手势）', () => {
+    const sent: string[] = []
+    render(
+      <MessageBubble message={msg({ role: 'user' })} onEditResend={(t) => sent.push(t)} canEdit />,
+    )
+    fireEvent.click(screen.getByLabelText('编辑'))
+    const box = screen.getByLabelText('编辑消息')
+    fireEvent.change(box, { target: { value: '改完了' } })
+    fireEvent.keyDown(box, { key: 'Enter', shiftKey: true })
+    expect(sent).toEqual([])
+    fireEvent.keyDown(box, { key: 'Enter' })
+    expect(sent).toEqual(['改完了'])
+  })
+
+  it('点取消回到原样，不交出内容', () => {
+    const sent: string[] = []
+    render(
+      <MessageBubble
+        message={msg({ role: 'user', content: '原样' })}
+        onEditResend={(t) => sent.push(t)}
+        canEdit
+      />,
+    )
+    fireEvent.click(screen.getByLabelText('编辑'))
+    fireEvent.change(screen.getByLabelText('编辑消息'), { target: { value: '改了但不发' } })
+    fireEvent.click(screen.getByRole('button', { name: '取消' }))
+    expect(sent).toEqual([])
+    expect(screen.queryByLabelText('编辑消息')).toBeNull()
+    expect(screen.getByLabelText('编辑')).toBeTruthy()
+  })
+
+  it('Esc 放弃编辑', () => {
+    render(<MessageBubble message={msg({ role: 'user' })} onEditResend={() => {}} canEdit />)
+    fireEvent.click(screen.getByLabelText('编辑'))
+    fireEvent.keyDown(screen.getByLabelText('编辑消息'), { key: 'Escape' })
+    expect(screen.queryByLabelText('编辑消息')).toBeNull()
+  })
+
+  // 清空了就当取消 —— 发一条空消息没有意义
+  it('清空内容后发送等于取消', () => {
+    const sent: string[] = []
+    render(
+      <MessageBubble message={msg({ role: 'user' })} onEditResend={(t) => sent.push(t)} canEdit />,
+    )
+    fireEvent.click(screen.getByLabelText('编辑'))
+    fireEvent.change(screen.getByLabelText('编辑消息'), { target: { value: '   ' } })
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(sent).toEqual([])
+    expect(screen.queryByLabelText('编辑消息')).toBeNull()
+  })
 })
 
 describe('ChatWindow', () => {
@@ -667,16 +805,34 @@ describe('SessionList', () => {
     expect(screen.queryByRole('button', { name: /移除项目/ })).toBeNull()
   })
 
-  it('设置入口是个裸图标按钮（无文字标签，只有 aria-label）', () => {
+  // 这条测试原来断言的是「裸图标、无文字」——那是更早的一次明确要求。
+  // 后来要求整体对齐 gpui，而 gpui 的设置入口是侧边栏**底部一整行**
+  // （齿轮 + 「设置」文字，见 rs/ui/src/sidebar.rs），所以前提整体换掉。
+  //
+  // 换位置的理由不只是「gpui 这样」：原来那个位置在右上角紧邻 macOS 红绿灯，
+  // 既容易误点，也让「设置」看起来像窗口控件的一部分。
+  it('设置入口在侧边栏底部，带图标和文字', () => {
     let opened = 0
-    render(
+    const { container } = render(
       <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} onOpenSettings={() => opened++} />,
     )
     const gear = screen.getByRole('button', { name: '设置' })
-    // 用户明确要求：只要图标，不要「设置」两个字、也不要那条占满宽度的按钮背景
-    expect(gear.textContent).toBe('')
+    expect(gear.textContent).toBe('设置')
     fireEvent.click(gear)
     expect(opened).toBe(1)
+    // 在底部：它是 aside 的最后一个子元素，排在滚动区之后
+    expect(container.querySelector('aside')!.lastElementChild).toBe(gear)
+  })
+
+  // 层级只用缩进表达，不画左引导线 —— gpui 侧是刻意不画的（sidebar.rs）：
+  // 线紧贴圆角行背景，折叠展开时会看到线头从圆角里突出来。
+  it('嵌套的会话列表不画左引导线', () => {
+    const { container } = render(
+      <SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />,
+    )
+    for (const el of container.querySelectorAll('ul, aside p')) {
+      expect(el.className).not.toMatch(/border-l/)
+    }
   })
 
   it('空项目显示「还没有对话」，让「添加项目」这个动作有可见结果', () => {

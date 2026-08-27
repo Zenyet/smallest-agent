@@ -1,11 +1,18 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { MessageBubble } from './MessageBubble'
+import { ProviderPicker } from './ProviderPicker'
+import { PermissionPicker } from './PermissionPicker'
+import { CliModelPicker } from './CliModelPicker'
 import { ApprovalCard } from './ApprovalCard'
 import { LoadingState } from './LoadingState'
 import { ThinkingState } from './ThinkingState'
 import { Icon } from './Icon'
+import { ModelPicker } from './ModelPicker'
+import type { VendorEntry } from '../../../main/vendors'
 import { visibleRange } from '../visible-window'
 import type { SessionChat } from '../chat-reducer'
+import type { PermissionMode } from '../../../main/providers'
+import type { ProvidersView } from '../../../shared/channels'
 import type { ApprovalDecision, ErrorCode } from '../../../shared/channels'
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
@@ -37,6 +44,15 @@ export function ChatWindow({
   onDecide,
   blockedBy,
   onJumpToBlocking,
+  modelCatalog,
+  currentVendor,
+  currentModel,
+  onPickModel,
+  onEditResend,
+  providers,
+  onPickProvider,
+  onPickPermission,
+  onPickCliModel,
 }: {
   chat: SessionChat
   sessionId: string
@@ -46,6 +62,22 @@ export function ChatWindow({
   onDecide: (decision: ApprovalDecision) => void
   blockedBy?: BlockedBy
   onJumpToBlocking?: () => void
+  // 模型选择器（composer 左下角）。四个一起给才渲染 —— 设置窗口那类
+  // 只读用法不传，composer 就退回「只有发送键」的老样子。
+  modelCatalog?: VendorEntry[]
+  currentVendor?: string
+  currentModel?: string
+  onPickModel?: (vendorId: string, modelId: string) => void
+  /**
+   * 编辑重发：改第 idx 条消息（界面下标）的内容，砍掉它之后的历史，重新提问。
+   * 不传就没有编辑入口 —— 编辑要砍磁盘历史，那是 App 那层才够得到的能力。
+   */
+  onEditResend?: (idx: number, text: string) => void
+  /** Agent 模式：有哪些引擎、当前哪个、权限模式。不传就不渲染那两个选择器 */
+  providers?: ProvidersView
+  onPickProvider?: (providerId: string) => void
+  onPickPermission?: (mode: PermissionMode) => void
+  onPickCliModel?: (modelId: string) => void
 }) {
   const [text, setText] = useState('')
   const [showAll, setShowAll] = useState(false)
@@ -87,6 +119,10 @@ export function ChatWindow({
     el.style.overflowY = contentHeight > maxHeight ? 'auto' : 'hidden'
   }, [text])
 
+  // 内置 agent 才显示厂商模型选择器和权限选择器 —— 外部 CLI 的模型来自它
+  // 自己声明的清单（走 CliModelPicker），权限它自己管（见 PermissionPicker 文件头）
+  const isBuiltin = !providers || providers.current === 'builtin'
+
   const blocked = chat.running || Boolean(blockedBy)
   const canSend = !blocked && text.trim().length > 0
   // 只在**这个**会话自己在跑时给停止键。别的会话占着串行锁时（blockedBy）
@@ -107,6 +143,10 @@ export function ChatWindow({
       return blockedBy.pendingApproval
         ? `等待你确认「${blockedBy.title}」里的写操作…`
         : `「${blockedBy.title}」正在处理中，请稍候…`
+    }
+    // 内置 agent 且未分组会话：文件工具不可用
+    if (isBuiltin && providers && !providers.projectPath) {
+      return '未分组会话的文件工具不可用，请在左上角选择项目'
     }
     return '问点什么（Enter 发送，Shift+Enter 换行）'
   }
@@ -141,7 +181,17 @@ export function ChatWindow({
             人们通常滚到顶部才点展开。要完全修正需要 useLayoutEffect 算 delta 调 scrollTop，
             对个人用桌面应用来说复杂度不值。 */}
         {chat.messages.slice(start).map((m, i) => (
-          <MessageBubble key={start + i} message={m} />
+          <MessageBubble
+            key={start + i}
+            message={m}
+            // 下标要加回 start：slice 之后 i 是窗口内的位置，
+            // 而截断要的是它在完整 messages 里的位置
+            onEditResend={onEditResend && ((text) => onEditResend(start + i, text))}
+            // 跑起来时不许编辑：那一轮还在往 messages 里写，之后的截断会和它打架。
+            // blockedBy 那种「别的会话占着锁」也不行 —— 重发要发起新一轮，
+            // 而串行锁不区分会话，发出去只会拿到 BUSY
+            canEdit={!chat.running && !blockedBy}
+          />
         ))}
         {/* 实时指示：有可展开的工具轨迹就露 ThinkingState，否则（纯等待）用像素加载器。
             两者都在窗口化 slice 之外 —— 它们只属于"现在正在发生的这一轮"，不受
@@ -204,7 +254,38 @@ export function ChatWindow({
               跑起来时这一格**换成**停止键，不是并排再加一个：这一行右下角
               只有一个控件位，而「跑着的时候不能发送」已经由 canSend 保证 ——
               两个键并排会同时有一个是灰的，占位又不可点。 */}
-          <div className="flex items-center justify-end">
+          <div className="flex items-center justify-between gap-2">
+            {/* 左下角：模型选择器。「这条消息谁来答」的时刻就是准备提问的
+                时刻，信息该出现在用户视线所在的地方（gpui 侧原话）。
+                没传选择器的四个 prop 时留一个空 span 占位，让发送键
+                继续靠右 —— justify-between 下少一个子元素会把它推到左边。 */}
+            {/* 左下角三个选择器，从左到右回答三个递进的问题：
+                  谁来跑（引擎）→ 用哪个脑子（模型）→ 能动多少东西（权限）
+
+                外部 CLI 时不显示后两个：模型清单由那个 CLI 自己声明（走
+                ProviderPicker 换引擎时一起换），而权限是内置 agent 专有的 ——
+                CLI 自带权限模型，我们管不住它，放一个只会让人误以为能管。 */}
+            <div className="flex min-w-0 items-center gap-0.5">
+              {providers && onPickProvider && (
+                <ProviderPicker view={providers} onPick={onPickProvider} />
+              )}
+              {isBuiltin && modelCatalog && onPickModel ? (
+                <ModelPicker
+                  catalog={modelCatalog}
+                  currentVendor={currentVendor ?? ''}
+                  currentModel={currentModel ?? ''}
+                  onPick={onPickModel}
+                />
+              ) : null}
+              {/* 外部 CLI 声明了模型清单时，换成它那份 */}
+              {!isBuiltin && providers && providers.models.length > 0 && onPickCliModel && (
+                <CliModelPicker view={providers} onPick={onPickCliModel} />
+              )}
+              {isBuiltin && providers && onPickPermission && (
+                <PermissionPicker current={providers.permission} onPick={onPickPermission} />
+              )}
+              {!providers && !modelCatalog && <span />}
+            </div>
             {canStop ? (
               <button
                 type="button"

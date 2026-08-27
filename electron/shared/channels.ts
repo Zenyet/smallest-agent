@@ -23,8 +23,10 @@ export const CH = {
   getSettings: 'agent:get-settings',
   saveSettings: 'agent:save-settings',
   restartApp: 'agent:restart-app',
-  // 设置窗口：独立 BrowserWindow（macOS 的 ⌘, 原生做法），不是 renderer 里的浮层。
-  // openSettings 是单例的——已经开着就聚焦，不会开出第二个。
+  // 打开设置：Main → Renderer 的事件（不是 invoke）。
+  //
+  // 设置在主窗口右栏渲染，不再是独立 BrowserWindow。原生菜单的 ⌘, 在主进程里，
+  // 它改不了 renderer 的 state，所以发这个事件过去让 App 切视图。
   openSettings: 'agent:open-settings',
   // 项目分组（会话按本地目录归类）。状态活在主进程的 electron-store 里，
   // 每个写操作都返回写完之后的完整状态，renderer 不自己推算。
@@ -43,6 +45,24 @@ export const CH = {
   // 和 projects 那几个一样，写操作返回写完之后的完整表，renderer 不自己推算。
   getSessionTitles: 'agent:get-session-titles',
   renameSession: 'agent:rename-session',
+  // 编辑重发时砍历史：砍到第 N 条用户消息之前（那一条本身也砍掉），
+  // 返回砍完之后的历史。
+  //
+  // 为什么按「第几条 user」而不是界面下标：磁盘和界面的下标不是一一对应的
+  // （磁盘上一轮是好几条消息，界面压成一个气泡），见 main/truncate.ts。
+  //
+  // 为什么磁盘也要砍、不只改界面：不砍的话重开 app 那几条会回来，
+  // 而且下一轮对话仍然带着它们（core 每轮从磁盘读历史）。
+  truncateSession: 'agent:truncate-session',
+  // --- Agent 模式（内置 agent / 外部 CLI）---
+  // 状态活在主进程的 electron-store 里（providers-store.ts），和项目分组同构：
+  // 每个写操作返回写完之后的完整状态，renderer 不自己推算。
+  getProviders: 'agent:get-providers',
+  setSessionProvider: 'agent:set-session-provider',
+  setSessionModel: 'agent:set-session-model',
+  setSessionPermission: 'agent:set-session-permission',
+  providersChanged: 'agent:providers-changed',
+
   // Provider detection（两段式）
   detectProviders: 'agent:detect-providers',
   importProvider: 'agent:import-provider',
@@ -165,6 +185,29 @@ export type ApprovalDecision = 'allow' | 'deny'
 export interface RunnerSnapshot {
   runningSessionId: string | null
   pendingApprovals: ApprovalRequestEvent[]
+}
+
+/**
+ * renderer 要显示引擎选择器需要的那点东西。
+ *
+ * 不直接把 ProvidersState 整个送过去：里面有各家 CLI 的 env（可能含 token），
+ * 而 renderer 只需要「有哪些可选、当前是哪个」。少送就是少一条泄漏路径。
+ */
+export interface ProvidersView {
+  /** 选择器里列哪些（内置永远第一个，disabled 的已经滤掉） */
+  options: { id: string; name: string; external: boolean }[]
+  /** 当前会话绑的 provider id */
+  current: string
+  /** 当前 provider 声明的模型清单。内置和没声明的给空数组 */
+  models: { id: string; name: string }[]
+  /** 当前选中的模型 id。没有可选模型时是 undefined */
+  currentModel?: string
+  /** 当前会话的权限模式（只对内置 agent 有意义） */
+  permission: 'readonly' | 'ask' | 'auto'
+  /** providers.json 在哪儿，设置页显示「去哪儿改」 */
+  configPath: string
+  /** 当前会话所属的项目路径。未分组会话给 undefined（此时文件工具不可用） */
+  projectPath?: string
 }
 
 // Provider detection 类型

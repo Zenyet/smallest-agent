@@ -1,12 +1,25 @@
 import { describe, it, expect } from 'vitest'
-import { validateSettingsPatch } from '../../electron/main/settings-validate'
+import { validateSettingsPatch, NUMERIC_SETTINGS } from '../../electron/main/settings-validate'
+import { SETTING_KEYS } from '../../electron/main/config-env'
 
 describe('validateSettingsPatch', () => {
   it('接受合法的设置对象', () => {
-    const result = validateSettingsPatch({ DEEPSEEK_API_KEY: 'sk-123', DEEPSEEK_MODEL: 'deepseek-chat' })
+    const result = validateSettingsPatch({ DEEPSEEK_API_KEY: 'sk-123', ACTIVE_MODEL: 'deepseek-chat' })
     expect(result.valid.DEEPSEEK_API_KEY).toBe('sk-123')
-    expect(result.valid.DEEPSEEK_MODEL).toBe('deepseek-chat')
+    expect(result.valid.ACTIVE_MODEL).toBe('deepseek-chat')
     expect(result.dropped).toEqual([])
+  })
+
+  // DEEPSEEK_MODEL / DEEPSEEK_BASE_URL 不再是用户可填的键——它们是 buildEnv
+  // 从「选了哪家 + 哪个模型」算出来的派生值（见 config-env.ts）。所以它们
+  // 现在会被当成未知 key 丢掉，这是有意的。
+  it('丢掉派生键 DEEPSEEK_MODEL / DEEPSEEK_BASE_URL', () => {
+    const result = validateSettingsPatch({
+      DEEPSEEK_MODEL: 'x',
+      DEEPSEEK_BASE_URL: 'y',
+    })
+    expect(result.dropped.sort()).toEqual(['DEEPSEEK_BASE_URL', 'DEEPSEEK_MODEL'])
+    expect(Object.keys(result.valid)).toEqual([])
   })
 
   it('记录被跳过的未知 key', () => {
@@ -30,9 +43,9 @@ describe('validateSettingsPatch', () => {
   })
 
   it('去掉纯空白的值', () => {
-    const result = validateSettingsPatch({ DEEPSEEK_API_KEY: '   ', DEEPSEEK_MODEL: '  model  ' })
+    const result = validateSettingsPatch({ DEEPSEEK_API_KEY: '   ', ACTIVE_MODEL: '  model  ' })
     expect('DEEPSEEK_API_KEY' in result.valid).toBe(false)
-    expect(result.valid.DEEPSEEK_MODEL).toBe('model')
+    expect(result.valid.ACTIVE_MODEL).toBe('model')
   })
 
   it('接受空对象，返回空对象', () => {
@@ -46,24 +59,21 @@ describe('validateSettingsPatch', () => {
     expect(result.valid.NOTES_DIR).toBe('/path/to/notes')
   })
 
+  // 用 SETTING_KEYS 自己生成输入，而不是手抄一份清单——手抄的那份会在
+  // 加字段（比如多厂商那批 key）时悄悄过期，而这条测试的意义正是
+  // 「SETTING_KEYS 里的每个键都能通过验证」
   it('接受所有 SETTING_KEYS 中的字段', () => {
-    const input: Record<string, string> = {
-      DEEPSEEK_API_KEY: 'sk-123',
-      DEEPSEEK_BASE_URL: 'https://api.example.com',
-      DEEPSEEK_MODEL: 'model',
-      FALLBACK_MODEL: 'fallback',
-      NOTES_DIR: '/notes',
-      EMBEDDING_MODEL: 'embed',
-      HF_ENDPOINT: 'https://hf.co',
-      STREAM: '1',
-      LLM_CACHE: '0',
-      MAX_RETRIES: '3',
-      MAX_TURNS: '15',
-      MAX_CONTEXT_TOKENS: '3000',
-      KEEP_RECENT: '8',
+    // 从被测模块导出的那份清单读，不再在测试里复制一份 ——
+    // 复制的那份漂过一次了（加 TEMPERATURE 时这里没跟上，红了一次）
+    const numeric = NUMERIC_SETTINGS
+    const boolean = new Set(['STREAM', 'LLM_CACHE'])
+    const input: Record<string, string> = {}
+    for (const key of SETTING_KEYS) {
+      input[key] = numeric.has(key) ? '3' : boolean.has(key) ? '1' : 'value'
     }
     const result = validateSettingsPatch(input)
-    expect(Object.keys(result.valid).length).toBe(13)
+    expect(result.dropped).toEqual([])
+    expect(Object.keys(result.valid).length).toBe(SETTING_KEYS.length)
   })
 
   it('拒绝数字型字段的非数字值', () => {

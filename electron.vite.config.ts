@@ -33,12 +33,11 @@ export default defineConfig({
     plugins: [react(), tailwindcss()],
     build: {
       rollupOptions: {
-        // 两个 renderer 入口 = 两个 BrowserWindow。设置窗口是独立窗口
-        // （macOS ⌘, 的原生做法）而不是主窗口里的浮层，所以它需要自己的
-        // HTML 和自己的 React 根。共用一份 styles.css，各自挂载。
+        // 一个 renderer 入口 = 一个 BrowserWindow。设置以前是独立窗口
+        // （macOS ⌘, 的原生做法），现在在主窗口右栏渲染 —— 改完 key 要回来
+        // 接着问，独立窗口每次都得切窗口、还会挡住对话。
         input: {
           index: resolve(root, 'electron/renderer/index.html'),
-          settings: resolve(root, 'electron/renderer/settings.html'),
         },
       },
     },

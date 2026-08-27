@@ -30,7 +30,7 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): RunnerDeps {
   const saved: { id: string; messages: Message[] }[] = []
   return {
     loadConfig: () => config,
-    makeSessionStore: () => ({
+    makeSessionStore: (_dir) => ({
       load: async () => [],
       save: async (id, messages) => {
         saved.push({ id, messages })
@@ -133,6 +133,8 @@ describe('createAgentRunner', () => {
       }),
     )
     const first = runner.run('s1', 'a')
+    // 等一小会儿，让第一个 run 真正进入 runAgent 并阻塞在 gate 上
+    await new Promise((r) => setTimeout(r, 10))
     await runner.run('s2', 'b') // 第二次应立刻被拒
     expect(started).toBe(1)
     expect(events.find((e) => e.type === 'error')?.payload).toMatchObject({

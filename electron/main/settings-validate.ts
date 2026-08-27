@@ -3,7 +3,7 @@ import { SETTING_KEYS, type DesktopSettings } from './config-env'
 
 // 数字型设置：这些字段对应 src/config.ts 里的 numFromEnv 调用，
 // 值必须能被 Number() 转成有限数，否则 loadConfig 会在启动时抛错。
-const NUMERIC_SETTINGS = new Set(['MAX_RETRIES', 'MAX_TURNS', 'MAX_CONTEXT_TOKENS', 'KEEP_RECENT', 'TEMPERATURE'])
+export const NUMERIC_SETTINGS = new Set(['MAX_RETRIES', 'MAX_TURNS', 'MAX_CONTEXT_TOKENS', 'KEEP_RECENT', 'TEMPERATURE'])
 
 // 布尔型设置：src/config.ts 用 `!== '0'` 判断真假，只区分 '0' 和其它值。
 // 允许 '0' / '1' / '' 这三个实际被区分的值，拒绝其它随意字符串（避免误导）。
@@ -32,7 +32,7 @@ export function validateSettingsPatch(raw: unknown): ValidationResult {
   for (const [key, value] of Object.entries(raw)) {
     // 未知 key：静默跳过而不是整体拒绝（renderer 可能比 main 更新，多出的字段不该让整个保存失败），
     // 但记录下来，让调用方有机会观察到不匹配（Task 15 review [Important] 要求）。
-    if (!allowed.has(key as keyof DesktopSettings)) {
+    if (!allowed.has(key as (typeof SETTING_KEYS)[number])) {
       dropped.push(key)
       continue
     }

@@ -122,16 +122,59 @@ export function createApprovalGate(options: ApprovalGateOptions = {}): ApprovalG
   }
 }
 
+/**
+ * 权限模式：这条会话能动多少东西。
+ *
+ * 定义在 providers.ts（那边是纯数据），这里只用它的三个取值 ——
+ * import 那个类型会让 approval.ts 依赖 provider 那一摊，而它比 provider
+ * 更底层（内置和外部两条路都经过它）。
+ */
+export type GuardMode = 'readonly' | 'ask' | 'auto'
+
 export function guardRegistry(
   registry: ToolRegistry,
   sessionId: string,
   gate: ApprovalGate,
   emit: (event: ApprovalRequestEvent) => void,
+  /**
+   * 权限模式。不传 = 'ask'，也就是原来的行为（所以现有调用点不用改）。
+   *
+   * ## 为什么在这一层表达，而不是按模式增删注册表
+   *
+   * 从这一个点表达三种模式，覆盖**所有**危险工具 —— 包括 MCP 带进来的那些
+   * （它们的名字我们控制不了，但都会经过 WRITE_TOOLS 判断，也就都会到这里）。
+   * 按模式增删注册表只能管住我们自己那几个工具。
+   */
+  mode: GuardMode = 'ask',
 ): ToolRegistry {
   const guarded: ToolRegistry = {}
 
   for (const [name, tool] of Object.entries(registry)) {
     if (!WRITE_TOOLS.has(name)) {
+      guarded[name] = tool
+      continue
+    }
+
+    // 只读：一律拒绝，不弹卡片。
+    //
+    // 返回和「用户拒绝」同一个结构而不是抛错 —— 理由和下面那条一样：
+    // 抛错会被 runTool 包成 {"error":...}，模型读成「工具坏了」然后反复重试。
+    // 明确说是拒绝，它才会换路子（比如改成只读的方式回答）。
+    if (mode === 'readonly') {
+      guarded[name] = {
+        ...tool,
+        run: async () => ({
+          denied: true,
+          reason: `当前是只读模式，${name} 被拒绝`,
+          toolName: name,
+        }),
+      }
+      continue
+    }
+
+    // 自动：不问直接放行。原样透传，连装饰都不加 ——
+    // 装一层空壳只会让栈里多一帧
+    if (mode === 'auto') {
       guarded[name] = tool
       continue
     }

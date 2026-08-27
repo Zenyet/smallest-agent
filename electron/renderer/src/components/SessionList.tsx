@@ -56,19 +56,7 @@ export function SessionList({
           红绿灯连按钮带边距占左上角约 78px 宽，pl-[78px] 给它让位，
           齿轮挤在右端剩下的空间里。
           齿轮本身要标 no-drag，否则它落在 drag 区里点不动（拖拽区会吃掉点击）。 */}
-      <div className="flex h-7 shrink-0 items-center justify-end pl-[78px] [-webkit-app-region:drag]">
-        <button
-          type="button"
-          aria-label="设置"
-          title="设置 (⌘,)"
-          onClick={onOpenSettings}
-          // 裸图标按钮：没有背景、没有边框、不占一整行宽度，只有 hover 时
-          // 用文字提亮做反馈。设置是低频入口，不该跟「新对话」抢视觉重量。
-          className="flex size-6 cursor-pointer items-center justify-center rounded-chip border-none bg-transparent p-0 text-ink-3 transition-colors duration-150 hover:text-ink [-webkit-app-region:no-drag]"
-        >
-          <Icon name="settings" size={13} strokeWidth={1.8} />
-        </button>
-      </div>
+      <div className="h-7 shrink-0 [-webkit-app-region:drag]" />
 
       {/* 新对话：跟下面的项目行/会话行同一套外观 —— 无默认背景、文字左对齐、
           只有 hover 时才出背景。以前它是 bg-ink 的实心按钮，在一个全是 hover 态
@@ -163,7 +151,7 @@ export function SessionList({
                   折叠时整个 <ul> 不渲染，而不是 display:none —— 长列表下这也省掉
                   几百个不可见节点的渲染开销。 */}
               {!group.collapsed && group.sessions.length > 0 && (
-                <ul className="m-0 flex list-none flex-col gap-px border-l border-line py-px pl-1.5">
+                <ul className="m-0 flex list-none flex-col gap-px py-px pl-1.5">
                   {group.sessions.map((s) => {
                     const isActive = s.id === currentId
                     // 改名中：整行换成输入框，不显示标题。
@@ -220,7 +208,7 @@ export function SessionList({
               {/* 空项目：刚添加完目录、还没在里面开对话时，不给一行提示的话
                   那次「添加项目」看起来就像什么都没发生。 */}
               {!group.collapsed && group.sessions.length === 0 && (
-                <p className="m-0 border-l border-line py-1 pl-3 text-[11.5px] text-ink-3">
+                <p className="m-0 py-1 pl-3 text-[11.5px] text-ink-3">
                   还没有对话
                 </p>
               )}
@@ -228,6 +216,22 @@ export function SessionList({
           )
         })}
       </div>
+      {/* 设置：侧边栏最底下一整行，跟 gpui 的 sidebar.rs 一致。
+          以前是右上角一个裸齿轮 —— 那个位置在 macOS 上紧邻红绿灯，既容易误点，
+          也让「设置」这个入口看起来像窗口控件的一部分。放到底部之后它和
+          「新对话」「项目行」共用同一套行外观（无默认背景、hover 才出底），
+          在一列行里读起来是同一类东西。
+          不标 no-drag：它在拖拽区之外，不会被拖拽区吃掉点击。 */}
+      <button
+        type="button"
+        aria-label="设置"
+        title="设置 (⌘,)"
+        onClick={onOpenSettings}
+        className="mt-auto flex h-7 shrink-0 cursor-pointer items-center gap-1.5 rounded-control border-none bg-transparent px-2 text-left text-[12.5px] text-ink-2 transition-[color,background-color] duration-150 hover:bg-hover hover:text-ink active:bg-surface"
+      >
+        <Icon name="settings" size={12} strokeWidth={1.8} />
+        <span className="flex-1">设置</span>
+      </button>
     </aside>
   )
 }
