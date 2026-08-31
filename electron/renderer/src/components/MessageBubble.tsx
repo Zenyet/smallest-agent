@@ -224,6 +224,8 @@ export function MessageBubble({
   canEdit?: boolean
 }) {
   const groups = groupByTurn(message.tools)
+  // 有工具卡片就定宽 —— 它们展开/折叠会改变内容宽度，见下面 wrapper 的注释
+  const hasTools = groups.length > 0
   const [editing, setEditing] = useState(false)
 
   // 编辑只给用户消息，且要有落点、且不在跑
@@ -240,7 +242,14 @@ export function MessageBubble({
     // 而操作栏现在是气泡的**兄弟**（不在气泡内部，见 MessageActions 的说明）。
     // 操作栏常驻但透明（不是 hover 时才挂进 DOM）—— 后者会让这一块在悬浮瞬间
     // 变高，下面所有消息跟着跳一下。常驻占位 + 改 opacity 布局是稳的。
-    <div className={`group flex max-w-[76%] min-w-0 flex-col ${ALIGN[message.role]}`}>
+    // w-fit + max-w：气泡按内容收缩（短消息不该占满一行），但**上限固定**。
+    //
+    // 有工具卡片时改成定宽：那些卡片展开后里面是 <pre>（不换行，固有宽度
+    // 等于最长那一行），会把气泡撑到上限；一折叠又缩回去 —— 表现出来就是
+    // 每次点开/收起整个气泡都在抖。定宽之后展开只改变高度，宽度不动。
+    <div
+      className={`group flex ${hasTools ? 'w-[76%]' : 'w-fit'} max-w-[76%] min-w-0 flex-col ${ALIGN[message.role]}`}
+    >
       <div className={`bubble ${SKIN[message.role]} min-w-0 max-w-full rounded-card px-3 py-2`}>
         {groups.map((events) => (
           // 同一轮内所有工具调用共享一个 elapsedMs（agent-runner 按轮测量，见那边的注释），

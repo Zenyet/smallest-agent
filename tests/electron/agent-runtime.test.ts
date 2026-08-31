@@ -38,10 +38,16 @@ describe('createRuntime', () => {
     expect(phases).toEqual(['embedding', 'indexing', 'mcp', 'ready'])
   })
 
-  it('合并本地 search_notes 和两个 MCP server 的工具', async () => {
+  it('注册表 = 自建 server 的工具 + 笔记检索 + 联网那两个', async () => {
     const rt = await createRuntime(config, specs, () => {}, makeDeps())
-    // fs server 不再在这里了（按项目目录懒建），所以只有自建工具 + 笔记检索
-    expect(Object.keys(rt.registry).sort()).toEqual(['get_weather', 'search_notes'])
+    // fs server 不在这里（按项目目录懒建，见 fs-tools.ts）。
+    // web_search / fetch_url 在这里：它们是全局能力，没有跟着项目走的边界。
+    expect(Object.keys(rt.registry).sort()).toEqual([
+      'fetch_url',
+      'get_weather',
+      'search_notes',
+      'web_search',
+    ])
   })
 
   // fs server 连不上的降级测试**移到 fs-tools.test.ts** 了 ——

@@ -59,7 +59,20 @@ export async function runAgent(userInput: string, deps: AgentDeps): Promise<stri
       toolCalls: result.toolCalls.length ? result.toolCalls : undefined,
     })
 
-    const toolResults: TurnInfo['toolResults'] = []
+    // 服务端已经跑完的工具（DeepSeek / OpenAI 的 web_search）先垫进来。
+    //
+    // 它们不进下面那个执行循环 —— 已经跑完了，再跑一次既没意义、本地也
+    // 没有这个工具。但要进 toolResults，否则 onTurn 报告不出去，
+    // 界面上「联网搜索了」这件事完全看不见。
+    //
+    // output 序列化成字符串：TurnInfo.toolResults 的 output 是 string
+    // （本地工具那条路上是 runTool 的 JSON 返回值），两边形状要一致，
+    // 否则消费方（trace 打印、UI 卡片）得分两种情况处理。
+    const toolResults: TurnInfo['toolResults'] = (result.serverToolCalls ?? []).map((c) => ({
+      name: c.name,
+      args: c.args,
+      output: typeof c.output === 'string' ? c.output : JSON.stringify(c.output),
+    }))
 
     // 【出口】模型没要调工具 = 它觉得能直接回答了 → 返回，循环结束。
     if (result.toolCalls.length === 0) {

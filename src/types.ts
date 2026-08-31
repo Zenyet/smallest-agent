@@ -13,6 +13,31 @@
 // 注意 'tool' 在 ReAct 循环里专门用来把工具执行结果喂回模型。
 export type Role = 'system' | 'user' | 'assistant' | 'tool'
 
+/**
+ * 多模态内容：文本、图片、文件（PDF 等）。
+ * 用于 user 消息的 content 字段（可选：不传时使用旧的 string content）。
+ */
+export type ContentPart =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image'
+      /** base64 编码的图片数据，格式：data:image/png;base64,... */
+      data: string
+      /** 可选的文件名（用于 UI 显示） */
+      filename?: string
+      /** 分析细节级别：auto（自动）、low（低分辨率）、high（高分辨率） */
+      detail?: 'auto' | 'low' | 'high'
+    }
+  | {
+      type: 'file'
+      /** base64 编码的文件数据 */
+      data: string
+      /** MIME 类型，如 'application/pdf' */
+      mimeType: string
+      /** 文件名 */
+      filename: string
+    }
+
 // 模型在 assistant 消息里「声明要调用某个工具」时附带的信息。
 // id 由模型生成，必须和后续 tool 消息里的 toolCallId 对上，
 // 模型才能把「调用请求」和「调用结果」关联起来。
@@ -27,9 +52,19 @@ export interface ToolCall {
 //   - assistant (带工具调用)  → toolCalls 有值
 //   - tool (工具结果)         → toolCallId + name 有值，与 ToolCall.id 对应
 //   - system / user / assistant (纯文本) → 只用 content
+//   - user (多模态)           → contentParts 有值（图片 + 文件）
 export interface Message {
   role: Role
+  /**
+   * 纯文本内容（向后兼容）。
+   * 多模态消息（user 带图片/文件）时这个字段仍然保留文本部分。
+   */
   content: string
+  /**
+   * 多模态内容数组（可选）。
+   * 当 user 消息包含图片或文件时使用。
+   */
+  contentParts?: ContentPart[]
   toolCalls?: ToolCall[]   // 仅出现在"请求调用工具"的 assistant 消息上
   toolCallId?: string      // 仅出现在 tool 消息上（回答的是哪个 call）
   name?: string            // 工具名，仅出现在 tool 消息上
@@ -40,6 +75,29 @@ export interface Message {
 export interface ModelResult {
   text: string
   toolCalls: ToolCall[]
+  /**
+   * 厂商**在服务端跑完**的工具（DeepSeek / OpenAI 的 web_search）。
+   *
+   * ## 为什么和 toolCalls 分开
+   *
+   * toolCalls 的语义是「模型要我们去跑这些」—— agent 循环会逐个执行、
+   * 把结果回传。而这些是**已经跑完的**：模型调它、服务端执行、结果直接
+   * 进了响应。混进 toolCalls 的话循环会拿 `web_search` 去本地注册表里查，
+   * 查不到就返回 `{"error":"unknown tool"}` 喂回模型 —— 模型会以为
+   * 搜索失败了。
+   *
+   * 分开之后循环不碰它们，但 onTurn 仍然报告出去，所以界面上看得见
+   * 「联网搜索了」这件事。这正是加这个字段的理由。
+   */
+  serverToolCalls?: ServerToolCall[]
+}
+
+/** 服务端执行完的一次工具调用。 */
+export interface ServerToolCall {
+  name: string
+  args: Record<string, unknown>
+  /** 结果。SDK 给什么就是什么（可能是结构化对象），序列化交给上层。 */
+  output: unknown
 }
 
 // callModel 的函数签名别名。
@@ -87,4 +145,50 @@ export interface Config {
   cacheEnabled: boolean      // 是否启用 LLM 结果磁盘缓存
   cacheDir: string           // 缓存目录
   stream: boolean            // 是否流式打印最终答案
+  /**
+   * 这家厂商自带的联网搜索怎么开。不填 = 没有（用我们自己的 web_search）。
+   *
+   * ## 为什么是「怎么开」而不是「有没有」
+   *
+   * 各家的形状不一样：智谱是往 tools 数组里加一项 `{type:'web_search'}`，
+   * 阿里是请求体里一个布尔 `enable_search: true`。所以存的是开关的**形状**，
+   * 由 llm.ts 在构造请求时翻译成对应的字段。
+   *
+   * ## 为什么绝大多数厂商是「没有」
+   *
+   * 厂商基本都有搜索，但多数只在各家的**原生 API** 上（OpenAI/DeepSeek 在
+   * Responses API、Gemini 的 google_search、Anthropic 的 web_search）——
+   * 而这个 app 走的是 OpenAI 兼容的 chat/completions，那是另一套协议形状。
+   * 兼容层上就能用的目前只有智谱和通义两家，见 electron/main/vendors.ts
+   * 里逐家的标注。
+   *
+   * CLI 不设置这个字段（它没有厂商选择，直接读 DEEPSEEK_* 环境变量），
+   * 所以是可选的。
+   */
+  nativeSearch?: NativeSearch
+  /**
+   * 走哪套协议：OpenAI 兼容的 chat/completions，还是 Responses API。
+   *
+   * 不填 = 'chat'。CLI 不设置这一项（它没有厂商选择），所以是可选的。
+   *
+   * 为什么这是独立的一维而不是 nativeSearch 的一个变体：见
+   * electron/main/vendors.ts 里 Protocol 的注释 —— Responses API 换的是
+   * 端点、请求体、响应形状三样，不是「换个开关」。
+   */
+  protocol?: 'chat' | 'responses'
 }
+
+/**
+ * 厂商自带搜索的开关形状。
+ *
+ * 和 electron/main/vendors.ts 里的同名类型保持一致 —— 那边是厂商目录
+ * （九家逐一标注），这里是 llm.ts 构造请求时要认的形状。
+ */
+export type NativeSearch =
+  | { kind: 'none' }
+  /** 请求体里一个布尔：`enable_search: true`（阿里通义） */
+  | { kind: 'enable-flag' }
+  /** tools 数组里加一项 `{ type: toolType }`（智谱、OpenRouter） */
+  | { kind: 'tool-type'; toolType: string }
+  /** tools 数组里加一项 builtin_function（月之暗面那种形状） */
+  | { kind: 'builtin-function'; name: string }

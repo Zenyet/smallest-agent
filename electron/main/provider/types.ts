@@ -71,6 +71,10 @@ export type EventSink = (event: TurnEvent) => void
 export interface TurnRequest {
   question: string
   /**
+   * 附件（图片、PDF 等）。可选，用于多模态输入。
+   */
+  attachments?: any[]
+  /**
    * 这一轮属于**哪个会话**（我们自己的会话 id，不是 ACP 那边的）。
    *
    * ## 为什么 provider 必须知道会话 id

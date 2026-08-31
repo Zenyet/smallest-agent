@@ -55,6 +55,36 @@ export type NativeSearch =
 
 const NONE: NativeSearch = { kind: 'none' }
 
+/**
+ * 这家厂商走哪套协议。
+ *
+ * ## 为什么光有 nativeSearch 不够
+ *
+ * nativeSearch 假设了「大家都是 chat/completions，只是开关形状不同」——
+ * 智谱往 tools 数组塞一项、通义在请求体加个布尔，那个假设对这两家成立。
+ *
+ * 但 DeepSeek 的 web_search 在 **Responses API** 上：不同的端点
+ * （`/responses` 而不是 `/chat/completions`）、不同的请求体（`input`
+ * 而不是 `messages`）、不同的响应形状（output 数组里 `message` /
+ * `function_call` / `web_search_call` 几种 item）。那不是「换个开关」，
+ * 是换一套协议。
+ *
+ * 所以协议是**独立的一维**：先按它选请求路径，再在那条路径里按
+ * nativeSearch 决定搜索怎么开。
+ *
+ * ## 为什么只有两个值
+ *
+ * Anthropic / Gemini 的原生 API 是第三、第四套形状，但我们不走它们 ——
+ * 那是 vendors.ts 那条「一套兼容端点覆盖多家」取舍的边界。加进来要为
+ * 每家写一套请求构造和响应解析，而它们的兼容层已经能用（只是没有
+ * 服务端搜索）。真要加的时候在这里加值，不用改结构。
+ */
+export type Protocol =
+  /** OpenAI 兼容的 chat/completions。九家里绝大多数走这条。 */
+  | 'chat'
+  /** OpenAI 的 Responses API。DeepSeek 的服务端搜索只在这条上。 */
+  | 'responses'
+
 export interface Vendor {
   id: string
   name: string
@@ -65,6 +95,8 @@ export interface Vendor {
   /** 去哪儿领 key。 */
   console: string
   nativeSearch: NativeSearch
+  /** 走哪套协议。不填 = 'chat'（绝大多数厂商）。 */
+  protocol?: Protocol
   models: VendorModel[]
 }
 
@@ -142,7 +174,15 @@ export const ALL: Vendor[] = [
     baseUrl: 'https://api.deepseek.com/v1',
     keyEnv: 'DEEPSEEK_API_KEY',
     console: 'https://platform.deepseek.com/api_keys',
-    nativeSearch: NONE, // 搜索在 Responses API 上，不是 chat/completions
+    // 走 Responses API：DeepSeek 的服务端 web_search 只在这条协议上。
+    //
+    // 代价是这家不再走 chat/completions —— 两条路径的响应解析不同，
+    // 由 llm.ts 按 protocol 分派（SDK 两边都实现了，我们只做映射）。
+    //
+    // 文档里两条限制值得记着：服务端搜索最多自动续 10 轮，
+    // 且 search_context_size / user_location 两个参数会被忽略。
+    protocol: 'responses',
+    nativeSearch: { kind: 'tool-type', toolType: 'web_search' },
     models: DEEPSEEK,
   },
   {
@@ -163,7 +203,9 @@ export const ALL: Vendor[] = [
     baseUrl: 'https://api.openai.com/v1',
     keyEnv: 'OPENAI_API_KEY',
     console: 'https://platform.openai.com/api-keys',
-    nativeSearch: NONE, // 同上：搜索在 Responses API 那边
+    // 同 DeepSeek：搜索在 Responses API 上，所以这家也走那条协议
+    protocol: 'responses',
+    nativeSearch: { kind: 'tool-type', toolType: 'web_search' },
     models: OPENAI,
   },
   {
@@ -289,6 +331,8 @@ export interface VendorEntry {
   baseUrl: string
   models: ModelChoice[]
   nativeSearch: NativeSearch
+  /** 走哪套协议。不填 = 'chat' */
+  protocol?: Protocol
 }
 
 /** 这个 id 是不是一个认识的厂商（含自定义端点）。 */
@@ -372,6 +416,7 @@ export function entry(id: string, get: Lookup): VendorEntry | undefined {
     baseUrl: v.baseUrl,
     models: v.models.map((m) => ({ ...m })),
     nativeSearch: v.nativeSearch,
+    ...(v.protocol ? { protocol: v.protocol } : {}),
   }
 }
 
@@ -440,6 +485,8 @@ export interface ResolvedProvider {
   baseUrl: string
   model: string
   nativeSearch: NativeSearch
+  /** 走哪套协议。不填 = 'chat' */
+  protocol?: Protocol
 }
 
 /**
@@ -498,5 +545,11 @@ export function resolveSelection(sel: Selection, get: Lookup): ResolvedProvider 
     throw new Error(`还没填 ${e.name} 的 API Key（设置 → 模型），去 ${console} 领一个`)
   }
 
-  return { apiKey: key, baseUrl: e.baseUrl, model: sel.model, nativeSearch: e.nativeSearch }
+  return {
+    apiKey: key,
+    baseUrl: e.baseUrl,
+    model: sel.model,
+    nativeSearch: e.nativeSearch,
+    ...(e.protocol ? { protocol: e.protocol } : {}),
+  }
 }

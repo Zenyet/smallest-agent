@@ -36,6 +36,24 @@ export interface DesktopSettings {
   CUSTOM_API_KEY?: string
   CUSTOM_MODELS?: string
   CUSTOM_SEARCH_TOOL?: string
+  /**
+   * 允许 agent 派活给子 agent（task 工具）。'0' = 关。
+   *
+   * 单独给一个开关是因为它**烧配额**：一次 parallel 最多 8 个子 agent，
+   * 每个都是一整个 ReAct 循环（自己的多轮 + 自己的工具调用）。用户该能在
+   * 不删掉子 agent 定义的前提下把这个能力停掉。
+   *
+   * 默认开（不写 = 开，同 STREAM / LLM_CACHE 的约定）。实际上没配任何子
+   * agent 时 task 工具压根不存在（makeTaskTool 返回 null），所以这个开关
+   * 只对「配了子 agent 但暂时不想让它派活」那种情况有意义。
+   */
+  SUBAGENT?: string
+  // --- 联网搜索的后端凭据（见 src/tools/web.ts 的文件头）---
+  //
+  // 两个都可选，都不填时 web_search 退到维基百科 —— 那一档不要 key，
+  // 保证这个工具在零配置下也不是「永远报错的工具」。
+  BRAVE_API_KEY?: string
+  TAVILY_API_KEY?: string
   // --- 多厂商 key（照 gpui 的 vendors.rs 移植，见 vendors.ts 文件头）---
   //
   // 每家一个 key 键，所以用户可以同时配好几家、随时切换而不用来回粘 key。
@@ -68,6 +86,12 @@ export const SETTING_KEYS = [
   'TEMPERATURE',
   'ACTIVE_VENDOR',
   'ACTIVE_MODEL',
+  // 联网搜索的后端 key。settings-fields.ts 早就把这两个框渲染出来了，
+  // 但它们一直不在这份清单里 —— 而 settings-validate 是按这份清单过滤的，
+  // 所以用户填完保存会被**静默丢掉**（存不下来，也没有任何提示）。
+  'BRAVE_API_KEY',
+  'TAVILY_API_KEY',
+  'SUBAGENT',
   ...CUSTOM_KEYS,
   ...keyEnvs(),
 ] as const satisfies readonly (keyof DesktopSettings)[]
@@ -134,6 +158,19 @@ export function buildEnv(
     env.DEEPSEEK_API_KEY = resolved.apiKey
     env.DEEPSEEK_BASE_URL = resolved.baseUrl
     env.DEEPSEEK_MODEL = resolved.model
+    // 这家自带的联网搜索开关。
+    //
+    // 序列化成 JSON 是因为 env 只能装字符串，而这是个带 kind 的联合类型
+    // （智谱要 toolType、阿里只要一个布尔）。loadConfig 那边解回来。
+    //
+    // kind==='none' 时不写：省掉一次没有意义的解析，也让 env 里少一项噪音。
+    if (resolved.nativeSearch.kind !== 'none') {
+      env.NATIVE_SEARCH = JSON.stringify(resolved.nativeSearch)
+    }
+    // 协议。不写 'chat' —— 那是默认值，写了只是 env 里多一项噪音
+    if (resolved.protocol && resolved.protocol !== 'chat') {
+      env.LLM_PROTOCOL = resolved.protocol
+    }
   } catch {
     // 留空：loadConfig 会因为 DEEPSEEK_API_KEY 缺失而报出「填了才能跑」
     // 这条既有路径，用户看到的是同一句提示，不是一个新的错误码。

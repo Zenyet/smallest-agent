@@ -61,6 +61,19 @@ export const SECTIONS: { id: SectionId; label: string; icon: IconName }[] = [
  */
 export const ADVANCED_MODEL_KEYS = ['TEMPERATURE'] as const
 
+/**
+ * 哪些字段渲染成开关而不是文本框。
+ *
+ * 它们在磁盘上存 '0' / '1' 字符串（config.ts 读的是 `env.X !== '0'`），
+ * 但那是**存储格式**，不该泄漏到界面上 —— 用户面对的是「要不要流式输出」，
+ * 不是「填 0 还是填 1」。
+ *
+ * 放在这里而不是 SettingsPanel 里：那边原本是一行
+ * `key === 'STREAM' || key === 'LLM_CACHE'`，加第三个就该变成一张表，
+ * 而「这个字段长什么样」和 GROUPS「这个字段在哪一页」是同一类知识。
+ */
+export const BOOLEAN_FIELDS = new Set(['STREAM', 'LLM_CACHE', 'SUBAGENT'])
+
 export const GROUPS: Partial<Record<SectionId, [string, string[]][]>> = {
   general: [['输出行为', ['STREAM', 'LLM_CACHE']]],
   // 凭据页**不在这张静态表里** —— 它的字段是按「select 里选了哪家」动态
@@ -74,7 +87,10 @@ export const GROUPS: Partial<Record<SectionId, [string, string[]][]>> = {
   // 曾经这里列过 keyEnvs() + CUSTOM_KEYS（九家全摊开）。留在表里的后果是
   // 两个渲染器都跑，同一个 key 出现两个 input、**id 还一样** —— 点标签
   // 聚焦到哪个由文档顺序决定。别加回来。
-  capabilities: [['网络搜索', ['BRAVE_API_KEY', 'TAVILY_API_KEY']]],
+  capabilities: [
+    ['网络搜索', ['BRAVE_API_KEY', 'TAVILY_API_KEY']],
+    ['子 agent', ['SUBAGENT']],
+  ],
   retrieval: [
     ['笔记来源', ['NOTES_DIR']],
     ['嵌入模型', ['EMBEDDING_MODEL', 'HF_ENDPOINT']],
@@ -122,6 +138,8 @@ export function label(key: string): string {
       return '流式输出'
     case 'LLM_CACHE':
       return '磁盘缓存'
+    case 'SUBAGENT':
+      return '允许派活给子 agent'
     case 'MAX_RETRIES':
       return '重试次数'
     case 'MAX_TURNS':
@@ -168,9 +186,11 @@ export function hint(key: string): string | undefined {
     case 'HF_ENDPOINT':
       return '国内连不上 HuggingFace 时填 https://hf-mirror.com'
     case 'STREAM':
-      return '填 0 关闭流式输出，填 1 开启'
+      return '答案边生成边显示，而不是等全部写完'
     case 'LLM_CACHE':
-      return '填 0 关闭磁盘缓存，填 1 开启'
+      return '同样的问题第二次问直接给上次的答案，省一次调用'
+    case 'SUBAGENT':
+      return '开了之后 agent 能把子任务派给你配的子 agent（在「Agent 模式」里配）。会明显多花配额：一次最多派 8 个，每个都是一整轮 agent 循环'
     case 'MAX_RETRIES':
       return '单个模型调用失败时的重试次数，默认 2'
     case 'MAX_TURNS':

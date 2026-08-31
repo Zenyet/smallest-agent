@@ -9,7 +9,7 @@
 // 实际上可以在不同 Stage 中扩展（如 Stage 3 加了引用来源要求）。
 // ============================================================================
 
-import type { Config } from './types'
+import type { Config, NativeSearch } from './types'
 
 // 系统提示：约束模型行为的「全局指令」，在每次 callModel 时作为首条 system 消息注入。
 // 两条关键约束：
@@ -67,5 +67,39 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheDir: env.LLM_CACHE_DIR ?? './.llm-cache',
     // STREAM=0 才关闭流式；同上，默认开启
     stream: env.STREAM !== '0',
+    // 厂商自带搜索的开关形状，由桌面端按选中的厂商写进来（见
+    // electron/main/config-env.ts）。CLI 不写这一项，所以通常是 undefined。
+    nativeSearch: parseNativeSearch(env.NATIVE_SEARCH),
+    // 认不出的值当成 'chat'（默认那条路径）—— 手改坏一个环境变量
+    // 不该让应用起不来，同 parseNativeSearch 的理由
+    protocol: env.LLM_PROTOCOL === 'responses' ? 'responses' : 'chat',
+  }
+}
+
+/**
+ * 解 NATIVE_SEARCH。
+ *
+ * **坏值一律当成「没有」，不抛错**：这一项是可选增强（少了只是用不上厂商
+ * 自带的搜索，我们自己那个 web_search 还在），而抛错会让整个应用起不来。
+ * 手改坏一个 JSON 不该是启动失败的理由 —— 那和缺 API key 不是一个级别的问题。
+ */
+function parseNativeSearch(raw: string | undefined): NativeSearch | undefined {
+  if (!raw) return undefined
+  try {
+    const v = JSON.parse(raw) as NativeSearch
+    // 只认这四种 kind。多一层判断是因为 JSON.parse 的结果是 any，
+    // 而一个 {kind:'乱写'} 会一路传到 llm.ts 的 switch 里静默不生效
+    if (
+      v &&
+      (v.kind === 'none' ||
+        v.kind === 'enable-flag' ||
+        v.kind === 'tool-type' ||
+        v.kind === 'builtin-function')
+    ) {
+      return v
+    }
+    return undefined
+  } catch {
+    return undefined
   }
 }

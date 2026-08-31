@@ -29,7 +29,7 @@ export function ToolCallGroup({
   return (
     // tool-group / tool-group--failed 保留作测试锚点，不带样式
     <div
-      className={`tool-group ${hasFailed ? 'tool-group--failed' : ''} mb-1.5 overflow-hidden rounded-control bg-canvas shadow-hairline`}
+      className={`tool-group ${hasFailed ? 'tool-group--failed' : ''} mb-1.5 w-full min-w-0 overflow-hidden rounded-control bg-canvas shadow-hairline`}
     >
       <button
         type="button"
@@ -55,7 +55,12 @@ export function ToolCallGroup({
       </button>
       {/* 默认折叠：把推理证据放在一次点击之外，是 beautifului.dev 模式的核心 */}
       {open && (
-        <div className="px-2 pb-2" style={{ animation: 'fade-up 200ms cubic-bezier(0.23,1,0.32,1) both' }}>
+        // pt-1.5：展开后第一个条目原本紧贴着标题按钮，中间没有任何间距。
+        // 只给 pb 不给 pt 是那种「上下不对称」的典型症状
+        <div
+          className="min-w-0 px-2 pt-1.5 pb-2"
+          style={{ animation: 'fade-in-only 140ms ease-out both' }}
+        >
           {events.map((event, i) => (
             <ToolCallIndicator key={`${event.turn}-${event.toolName}-${i}`} event={event} />
           ))}

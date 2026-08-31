@@ -19,7 +19,7 @@ import { compactMessages, type Summarize } from '../../../src/memory/compact'
 import { guardRegistry, type ApprovalGate, type GuardMode } from '../approval'
 import { withCancel } from '../cancel'
 import type { runAgent as realRunAgent, TurnInfo } from '../../../src/agent'
-import type { CallModel, Config, Message, ToolRegistry } from '../../../src/types'
+import type { CallModel, Config, Message, Tool, ToolRegistry } from '../../../src/types'
 import type { ApprovalRequestEvent } from '../../shared/channels'
 import type { Provider, TurnRequest, TurnResult } from './types'
 import { BUILTIN_ID } from '../providers'
@@ -40,6 +40,14 @@ export interface BuiltinDeps {
   onApprovalRequest: (event: ApprovalRequestEvent) => void
   /** 这个会话的权限模式。不传 = 'ask'（原来的行为） */
   permission?: GuardMode
+  /**
+   * 造 task 工具（派子 agent）。返回 null = 这一轮不给这个工具。
+   *
+   * 为什么是个回调而不是直接传工具：它要拿到**审批装饰过**的注册表，
+   * 而那个装饰是请求级的（sessionId 只在 runTurn 里才知道）。传现成的工具
+   * 就只能拿到未装饰的注册表 —— 那样「派个子 agent 去改文件」会绕过审批。
+   */
+  makeTaskTool?: (guardedRegistry: ToolRegistry, config: Config) => Tool | null
 }
 
 export function createBuiltinProvider(deps: BuiltinDeps): Provider {
@@ -57,10 +65,18 @@ export function createBuiltinProvider(deps: BuiltinDeps): Provider {
         deps.permission,
       )
 
+      // task 工具在**装饰之后**注入：子 agent 拿到的是同一份带审批的注册表，
+      // 所以它写文件同样要用户点确认。装饰之前注入的话，「派个子 agent 去
+      // 改文件」就是一条绕过审批的旁路。
+      const task = deps.makeTaskTool?.(guardedRegistry, req.config)
+      const registry: ToolRegistry = task
+        ? { ...guardedRegistry, [task.name]: task }
+        : guardedRegistry
+
       // 流式回调绑定本次请求 —— 这就是 callModel 必须请求级重建的原因
       const callModel = deps.buildCallModel(
         req.config,
-        guardedRegistry,
+        registry,
         (text) => req.emit({ kind: 'delta', text }),
         () => req.emit({ kind: 'cache-hit' }),
       )
@@ -83,7 +99,7 @@ export function createBuiltinProvider(deps: BuiltinDeps): Provider {
 
       const answer = await deps.runAgent(req.question, {
         callModel: cancellableCallModel,
-        tools: guardedRegistry,
+        tools: registry,
         config: req.config,
         history: req.history,
         compact: (messages: Message[]) =>

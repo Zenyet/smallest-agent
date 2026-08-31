@@ -3,6 +3,7 @@
 import type { ElectronAPI } from '../../main/preload'
 
 // 测试环境的 fallback mock
+const emptyAgentsView = { agents: [], availableTools: [], configPath: '' }
 const emptyProvidersView = {
   options: [{ id: 'builtin', name: '内置 agent', external: false }],
   current: 'builtin',
@@ -32,6 +33,11 @@ const mockAPI: ElectronAPI = {
   assignSession: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
   toggleProjectCollapsed: async () => ({ projects: [], sessionProject: {}, collapsed: [] }),
   respondApproval: async () => {},
+  getAgents: async () => emptyAgentsView,
+  saveAgent: async () => emptyAgentsView,
+  deleteAgent: async () => emptyAgentsView,
+  setSessionAgent: async () => emptyAgentsView,
+  onAgentsChanged: () => () => {},
   getProviders: async () => emptyProvidersView,
   setSessionProvider: async () => emptyProvidersView,
   setSessionModel: async () => emptyProvidersView,
@@ -40,7 +46,7 @@ const mockAPI: ElectronAPI = {
   detectProviders: async () => [],
   importProvider: async () => null,
   getRuntimeStatus: async () => ({ phase: 'ready', detail: 'mock' }),
-  getRunnerSnapshot: async () => ({ runningSessionId: null, pendingApprovals: [] }),
+  getRunnerSnapshot: async () => ({ runningSessionIds: [], pendingApprovals: [] }),
   onMessageChunk: () => () => {},
   onToolCall: () => () => {},
   onMessageComplete: () => () => {},

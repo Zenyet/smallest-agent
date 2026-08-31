@@ -54,6 +54,14 @@ export const CH = {
   // 为什么磁盘也要砍、不只改界面：不砍的话重开 app 那几条会回来，
   // 而且下一轮对话仍然带着它们（core 每轮从磁盘读历史）。
   truncateSession: 'agent:truncate-session',
+  // --- 自定义 agent（一套预设：系统提示 + 工具白名单）---
+  // 和「Agent 模式」是两件事：那个选「谁来跑」，这个选「用什么设定跑」。
+  getAgents: 'agent:get-agents',
+  saveAgent: 'agent:save-agent',
+  deleteAgent: 'agent:delete-agent',
+  setSessionAgent: 'agent:set-session-agent',
+  agentsChanged: 'agent:agents-changed',
+
   // --- Agent 模式（内置 agent / 外部 CLI）---
   // 状态活在主进程的 electron-store 里（providers-store.ts），和项目分组同构：
   // 每个写操作返回写完之后的完整状态，renderer 不自己推算。
@@ -183,8 +191,33 @@ export type ApprovalDecision = 'allow' | 'deny'
 // sessionId/toolName/args），approval.ts 的 PendingApproval 结构上与它相同，
 // 不需要为了这一次 IPC 往返再定义一个几乎一样的类型。
 export interface RunnerSnapshot {
-  runningSessionId: string | null
+  /** 正在跑的会话 ID（可能多个，按开始顺序）。 */
+  runningSessionIds: string[]
   pendingApprovals: ApprovalRequestEvent[]
+}
+
+/**
+ * 自定义 agent 的视图。
+ *
+ * 直接把 AgentDef 送过去（不像 ProvidersView 那样裁剪）—— 这里面没有凭据，
+ * 系统提示本来就是用户自己写的，renderer 要能编辑它。
+ */
+export interface AgentsView {
+  agents: {
+    id: string
+    name: string
+    description?: string
+    systemPrompt?: string
+    model?: string
+    tools?: string[]
+    disabled?: boolean
+  }[]
+  /** 当前会话绑的 agent id。没绑是 undefined */
+  current?: string
+  /** 有哪些工具可以进白名单，给编辑界面列复选框用 */
+  availableTools: string[]
+  /** 配置文件在哪儿 */
+  configPath: string
 }
 
 /**

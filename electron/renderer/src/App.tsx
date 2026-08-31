@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { SessionList } from './components/SessionList'
 import { catalog as buildCatalog, DEFAULT_VENDOR, defaultModel } from '../../main/vendors'
-import { ChatWindow, type BlockedBy } from './components/ChatWindow'
+import { ChatWindow } from './components/ChatWindow'
 import { SettingsPanel } from './components/SettingsPanel'
 import { SettingsNav } from './components/SettingsNav'
 import { SECTIONS, type SectionId } from './settings-fields'
@@ -196,9 +196,10 @@ export function App() {
       }
 
       const snapshot = await api.getRunnerSnapshot()
-      if (snapshot.runningSessionId) {
-        dispatch({ type: 'hydrate-running', sessionId: snapshot.runningSessionId })
-      }
+      // 主进程是「谁在跑」的权威真相，用它整体对齐一次。
+      // reconcile 而不是 hydrate-running：那个只会**点亮**，没法熄灭 ——
+      // 见 chat-reducer 里 reconcile-running 的注释。
+      dispatch({ type: 'reconcile-running', sessionIds: snapshot.runningSessionIds })
       for (const req of snapshot.pendingApprovals) {
         dispatch({ type: 'approval-request', event: req })
       }
@@ -301,7 +302,26 @@ export function App() {
       // 接着点「新对话」应该继续落在那个项目里，而不是掉回「未分组」。
       const projectId = sessions.find((s) => s.id === id)?.projectId ?? null
       setCurrentProjectId(projectId)
-      const messages = await api.loadSession(id)
+      // 一起问「现在谁在跑」，拿主进程那份权威真相对齐一次。
+      //
+      // 为什么切会话时要对齐：前端的 running 只靠事件维护，而事件是「当时在场
+      // 才收得到」。丢一个终止事件、或者到达时序乱了，那个会话就永久卡在
+      // 「正在思考…」—— 用户报过这个症状，只能重启 app 才能解开。
+      // 有了这次对齐，最坏情况也只持续到下一次切会话。
+      //
+      // 并发发出去而不是串行 await 两次：它们互不依赖，串起来会让切换多等
+      // 一个往返（切会话是高频操作，用户能感觉到这一下迟滞）。
+      const [messages, snapshot] = await Promise.all([
+        api.loadSession(id),
+        api.getRunnerSnapshot(),
+      ])
+      // 顺序要紧：先对齐 running，再放 messages。
+      //
+      // 反过来的话 loaded 会先看到一个过期的 running=true（那一轮其实已经
+      // 结束了），于是走「在跑就保留内存那份」的分支、拒绝这次磁盘历史 ——
+      // 而磁盘上恰好是刚刚答完的完整内容。用户看到的就是「切回来还在转圈，
+      // 内容也没更新」。
+      dispatch({ type: 'reconcile-running', sessionIds: snapshot.runningSessionIds })
       dispatch({ type: 'loaded', sessionId: id, messages })
     },
     [sessions],
@@ -381,6 +401,12 @@ export function App() {
         }
         return
       }
+      // 删成功了，把它的 chats 桶也丢掉。不清的话那个桶会一直留着，
+      // 里面的消息（可能很长，含工具输出）占着内存直到 app 关掉。
+      //
+      // 放在 catch 之后：删除失败时桶要留着，那个会话还在。
+      dispatch({ type: 'session-removed', sessionId: id })
+
       const list = await api.listSessions()
       const merged = mergeSessions(list, sessions, deletedIdsRef.current)
       setSessions(merged)
@@ -413,9 +439,8 @@ export function App() {
       dispatch({ type: 'user-sent', sessionId: currentId, text })
       // sendMessage 这次 IPC 往返本身失败（比如主进程那边的 handler 抛错）
       // 不代表"这轮没跑"会自然被别的事件告知——user-sent 已经乐观地把这个会话标成
-      // running，没人清掉的话它会一直卡在"正在思考…"，还会通过 blockedBy 把
-      // 全局串行锁误报成被这个会话永久占着。必须在这里显式兜底，把它变成一条
-      // 看得见的错误，并释放这个会话的 running。
+      // running，没人清掉的话它会一直卡在"正在思考…"。必须在这里显式兜底，
+      // 把它变成一条看得见的错误，并释放这个会话的 running。
       api.sendMessage(currentId, text).catch((err: unknown) => {
         dispatch({
           type: 'error',
@@ -494,19 +519,6 @@ export function App() {
     },
     [currentId, chats],
   )
-
-  const blockedBy: BlockedBy | undefined = useMemo(() => {
-    if (!currentId) return undefined
-    const other = Object.entries(chats).find(([id, chat]) => id !== currentId && chat.running)
-    if (!other) return undefined
-    const [id, chat] = other
-    const title = sessions.find((s) => s.id === id)?.title ?? '另一个会话'
-    return { sessionId: id, title, pendingApproval: Boolean(chat.pendingApproval) }
-  }, [currentId, chats, sessions])
-
-  const jumpToBlocking = useCallback(() => {
-    if (blockedBy) void select(blockedBy.sessionId)
-  }, [blockedBy, select])
 
   const chat = (currentId && chats[currentId]) || emptySession()
 
@@ -653,8 +665,6 @@ export function App() {
             onSend={send}
             onCancel={cancel}
             onDecide={onDecide}
-            blockedBy={blockedBy}
-            onJumpToBlocking={jumpToBlocking}
             modelCatalog={modelCatalog}
             currentVendor={activeVendor}
             currentModel={activeModel}

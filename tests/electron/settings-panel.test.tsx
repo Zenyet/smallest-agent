@@ -362,6 +362,111 @@ describe('SettingsPanel', () => {
     }
   })
 
+  // --- 布尔字段用开关，不是填 0/1 ---
+  //
+  // 那两个键在磁盘上确实存 '0'/'1'（src/config.ts 读的是 `env.STREAM !== '0'`），
+  // 但那是**存储格式**，不该泄漏到界面上 —— 用户面对的是「要不要流式输出」。
+
+  it('STREAM / LLM_CACHE 渲染成开关，不是文本框', () => {
+    renderAt('通用')
+    for (const key of ['STREAM', 'LLM_CACHE']) {
+      const el = screen.getByLabelText(key)
+      expect(el.getAttribute('role'), `${key} 该是开关`).toBe('switch')
+      expect(el.tagName).not.toBe('INPUT')
+    }
+  })
+
+  // 默认开：src/config.ts 是 `!== '0'`，所以没设过等于开
+  it('没设过时是开着的（跟 config 的默认一致）', () => {
+    renderAt('通用')
+    expect(screen.getByLabelText('STREAM').getAttribute('aria-checked')).toBe('true')
+  })
+
+  it("存的是 '0' 时显示关", () => {
+    renderAt('通用', { settings: { STREAM: '0' } })
+    expect(screen.getByLabelText('STREAM').getAttribute('aria-checked')).toBe('false')
+  })
+
+  it("存的是 '1' 时显示开", () => {
+    renderAt('通用', { settings: { STREAM: '1' } })
+    expect(screen.getByLabelText('STREAM').getAttribute('aria-checked')).toBe('true')
+  })
+
+  // 存回去的仍然是 '0'/'1' 字符串 —— 换 UI 不能改磁盘格式，
+  // 否则 src/config.ts 那边读不出来
+  it("点开关存回 '0'/'1'，不是布尔", async () => {
+    const saved: DesktopSettings[] = []
+    renderAt('通用', { onSave: async (p) => { saved.push(p) } })
+    fireEvent.click(screen.getByLabelText('STREAM'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(saved[0]?.STREAM).toBe('0')
+  })
+
+  it('再点一次变回来', async () => {
+    const saved: DesktopSettings[] = []
+    renderAt('通用', { settings: { STREAM: '0' }, onSave: async (p) => { saved.push(p) } })
+    fireEvent.click(screen.getByLabelText('STREAM'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(saved[0]?.STREAM).toBe('1')
+  })
+
+  // 布尔字段是立即保存的（不防抖）：开关的反馈该是即时的，
+  // 而文本框防抖是为了避免每敲一个字母存一次
+  it('开关立即保存，不等防抖', async () => {
+    const saved: DesktopSettings[] = []
+    renderAt('通用', { onSave: async (p) => { saved.push(p) } })
+    fireEvent.click(screen.getByLabelText('STREAM'))
+    await new Promise((r) => setTimeout(r, 20))
+    expect(saved).toHaveLength(1)
+  })
+
+  // 非布尔字段不该被误判成开关
+  it('数字字段仍然是文本框', () => {
+    renderAt('高级')
+    expect(screen.getByLabelText('MAX_TURNS').tagName).toBe('INPUT')
+  })
+
+  // --- 子 agent 开关 ---
+  //
+  // 单独给一个开关是因为它**烧配额**：一次 parallel 最多 8 个子 agent，
+  // 每个都是一整个 ReAct 循环。用户该能在不删掉子 agent 定义的前提下停掉它。
+
+  it('子 agent 开关在「能力」页，渲染成开关', () => {
+    renderAt('能力')
+    const el = screen.getByLabelText('SUBAGENT')
+    expect(el.getAttribute('role')).toBe('switch')
+  })
+
+  it('默认开着（不写 = 开，同 STREAM / LLM_CACHE 的约定）', () => {
+    renderAt('能力')
+    expect(screen.getByLabelText('SUBAGENT').getAttribute('aria-checked')).toBe('true')
+  })
+
+  it("存 '0' 时显示关", () => {
+    renderAt('能力', { settings: { SUBAGENT: '0' } })
+    expect(screen.getByLabelText('SUBAGENT').getAttribute('aria-checked')).toBe('false')
+  })
+
+  it("关掉时存 '0'", async () => {
+    const saved: DesktopSettings[] = []
+    renderAt('能力', { onSave: async (p) => { saved.push(p) } })
+    fireEvent.click(screen.getByLabelText('SUBAGENT'))
+    await new Promise((r) => setTimeout(r, 50))
+    expect(saved[0]?.SUBAGENT).toBe('0')
+  })
+
+  // 说明里要点出「烧配额」这件事 —— 用户开它之前该知道代价
+  it('说明里点出会多花配额', () => {
+    renderAt('能力')
+    expect(screen.getByText(/配额/)).toBeTruthy()
+  })
+
+  // 这两个改成开关之后，「填 0 关闭」那种说明就过时了 —— 界面上没有可填的框
+  it('开关类字段的说明不再讲「填 0 / 填 1」', () => {
+    renderAt('通用')
+    expect(screen.queryByText(/填 0/)).toBeNull()
+  })
+
   // 分区和 gpui 的 SettingsSection 一一对应
   it('六个分区，和 gpui 的分区一致', () => {
     // 「模型」那个分区名去掉了：选模型在 composer，设置页只填凭据

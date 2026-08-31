@@ -290,7 +290,7 @@ describe('chatReducer', () => {
       { type: 'chunk', event: { sessionId: 's1', text: '部分' } },
       { type: 'approval-request', event: req },
     )
-    // 在这个状态下回放历史（比如用户切到别的会话又切回来，Task 12/13 可能重新拉一遍）
+    // 在这个状态下回放历史（用户切到别的会话又切回来，select() 会重新拉一遍）
     const afterLoad = chatReducer(s, {
       type: 'loaded',
       sessionId: 's1',
@@ -299,7 +299,12 @@ describe('chatReducer', () => {
         { role: 'assistant', content: '旧答案' },
       ],
     })
-    expect(afterLoad.s1.messages.map((m) => m.content)).toEqual(['旧问题', '旧答案'])
+    // ⚠️ 这条断言改过。原来断言的是 ['旧问题','旧答案'] —— 即「磁盘那份覆盖
+    // 内存」。那和这个测试自己的名字矛盾：替换 messages 恰恰**破坏了**正在跑
+    // 的那轮。存盘发生在 onComplete，所以这轮还在跑时磁盘上是上一轮的历史，
+    // 覆盖下去用户的提问和已流出的字就没了，之后的 chunk 还会另起一条从半句
+    // 开始累积。见 tests/electron/turn-state.test.ts 的缺陷 2。
+    expect(afterLoad.s1.messages.map((m) => m.content)).toEqual(['q', '部分'])
     expect(afterLoad.s1.running).toBe(true) // 保留"正在跑"
     expect(afterLoad.s1.pendingApproval).toEqual(req) // 保留审批弹窗状态
     expect(afterLoad.s1.error).toBeUndefined() // error 不持久化，回放时清掉

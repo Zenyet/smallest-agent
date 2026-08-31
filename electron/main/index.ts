@@ -228,6 +228,13 @@ app.whenReady().then(async () => {
       // 项目变，所以按目录懒建（见 fs-tools.ts）
       { own: ownServerSpec(pathsInput) },
       sendStatus,
+      {},
+      // 每次搜索时重新读设置，而不是在这里取一次值 —— 用户可能跑起来之后
+      // 才去填 key，取值的话得重启才生效（其它设置项都是即时的）。
+      () => {
+        const s = getSettings()
+        return { brave: s.BRAVE_API_KEY, tavily: s.TAVILY_API_KEY }
+      },
     )
 
     const fsPool = createFsToolsPool()
@@ -249,8 +256,8 @@ app.whenReady().then(async () => {
     // 这期间新的 sendMessage 可能到达。restarting 标志在检查通过后立即设置、传给 handlers，
     // 让 sendMessage 在那个窗口期也能看到"正在重启"并拒绝新工作，关上了竞态的门。
     ipcMain.handle(CH.restartApp, () => {
-      const runningId = runnerInterface.runningSessionId()
-      if (runningId) {
+      const ids = runnerInterface.runningSessionIds()
+      if (ids.length > 0) {
         throw new Error('有会话正在处理中，无法重启。请等待它完成或拒绝待审批的操作后重试。')
       }
       const pending = gate.pending()

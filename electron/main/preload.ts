@@ -21,7 +21,9 @@ import type {
   ProviderDetection,
   ProviderSecret,
   ProvidersView,
+  AgentsView,
 } from '../shared/channels'
+import type { ContentPart } from '../../src/types'
 
 // 事件订阅统一包成「注册回调 → 返回取消函数」，React 的 useEffect 直接 return 它就能清理。
 function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
@@ -32,8 +34,8 @@ function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
 
 const api = {
   ping: (): Promise<'pong'> => ipcRenderer.invoke(CH.ping),
-  sendMessage: (sessionId: string, message: string): Promise<void> =>
-    ipcRenderer.invoke(CH.sendMessage, sessionId, message),
+  sendMessage: (sessionId: string, message: string, attachments?: ContentPart[]): Promise<void> =>
+    ipcRenderer.invoke(CH.sendMessage, sessionId, message, attachments),
   // 返回「有没有受理」，不代表已经停了 —— 真停下来时会收到 onCancelled。
   cancelMessage: (sessionId: string): Promise<boolean> =>
     ipcRenderer.invoke(CH.cancelMessage, sessionId),
@@ -79,6 +81,16 @@ const api = {
   respondApproval: (requestId: string, decision: ApprovalDecision): Promise<void> =>
     ipcRenderer.invoke(CH.approvalResponse, requestId, decision),
 
+  // --- 自定义 agent ---
+  getAgents: (sessionId: string): Promise<AgentsView> =>
+    ipcRenderer.invoke(CH.getAgents, sessionId),
+  saveAgent: (sessionId: string, def: Record<string, unknown>): Promise<AgentsView> =>
+    ipcRenderer.invoke(CH.saveAgent, sessionId, def),
+  deleteAgent: (sessionId: string, id: string): Promise<AgentsView> =>
+    ipcRenderer.invoke(CH.deleteAgent, sessionId, id),
+  setSessionAgent: (sessionId: string, agentId: string | null): Promise<AgentsView> =>
+    ipcRenderer.invoke(CH.setSessionAgent, sessionId, agentId),
+
   // --- Agent 模式（内置 agent / 外部 CLI）---
   // 写操作返回写完之后的完整视图，renderer 不自己推算下一个状态。
   getProviders: (sessionId: string): Promise<ProvidersView> =>
@@ -117,6 +129,7 @@ const api = {
   onSettingsChanged: (cb: (d: DesktopSettings) => void) => subscribe(CH.settingsChanged, cb),
   onProjectsChanged: (cb: (d: ProjectsState) => void) => subscribe(CH.projectsChanged, cb),
   onProvidersChanged: (cb: (d: ProvidersView) => void) => subscribe(CH.providersChanged, cb),
+  onAgentsChanged: (cb: (d: AgentsView) => void) => subscribe(CH.agentsChanged, cb),
 }
 
 contextBridge.exposeInMainWorld('electronAPI', api)

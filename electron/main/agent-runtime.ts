@@ -6,6 +6,11 @@ import { makeEmbedder as realMakeEmbedder } from '../../src/rag/embed'
 import { buildNotesIndex as realBuildNotesIndex } from '../../src/rag/index'
 import { makeSearchNotesTool as realMakeSearchNotesTool } from '../../src/tools/searchNotes'
 import { loadMcpToolsFromServers as realLoadMcpToolsFromServers } from '../../src/mcp/client'
+import {
+  makeWebSearchTool as realMakeWebSearchTool,
+  makeFetchUrlTool as realMakeFetchUrlTool,
+  type WebSearchKeys,
+} from '../../src/tools/web'
 import { connectMcpWithEnv } from './mcp-connect'
 import type { McpServerSpec } from './mcp-paths'
 import type { RuntimeStatusEvent } from '../shared/channels'
@@ -28,6 +33,8 @@ export interface RuntimeDeps {
   buildNotesIndex: typeof realBuildNotesIndex
   makeSearchNotesTool: typeof realMakeSearchNotesTool
   loadMcpToolsFromServers: typeof realLoadMcpToolsFromServers
+  makeWebSearchTool: typeof realMakeWebSearchTool
+  makeFetchUrlTool: typeof realMakeFetchUrlTool
 }
 
 const defaultDeps: RuntimeDeps = {
@@ -35,6 +42,8 @@ const defaultDeps: RuntimeDeps = {
   buildNotesIndex: realBuildNotesIndex,
   makeSearchNotesTool: realMakeSearchNotesTool,
   loadMcpToolsFromServers: realLoadMcpToolsFromServers,
+  makeWebSearchTool: realMakeWebSearchTool,
+  makeFetchUrlTool: realMakeFetchUrlTool,
 }
 
 export async function createRuntime(
@@ -43,6 +52,17 @@ export async function createRuntime(
   specs: { own: McpServerSpec },
   onStatus: (event: RuntimeStatusEvent) => void,
   deps: Partial<RuntimeDeps> = {},
+  /**
+   * 搜索后端的 key 从哪儿读。
+   *
+   * 是个**函数**而不是值：用户可能在应用跑起来之后才去设置里填 key，
+   * 传值的话这个 runtime 会一直拿着启动那一刻的空 key，用户填完得重启
+   * 才生效 —— 而设置里其它项都是即时生效的，这一项特殊会让人以为没保存。
+   *
+   * 默认返回空：两个 key 都没有时 web_search 退到维基百科（那一档不要
+   * key），所以「读不到设置」不等于「这个工具坏了」。见 src/tools/web.ts。
+   */
+  searchKeys: () => WebSearchKeys = () => ({}),
 ): Promise<AgentRuntime> {
   const d = { ...defaultDeps, ...deps }
   const closers: (() => Promise<void>)[] = []
@@ -68,9 +88,15 @@ export async function createRuntime(
     // 留在这里的都是**和会话无关**的全局资源：embedding 模型、笔记索引、
     // 自建 server（Skills，它不碰用户的文件）。
     const searchTool = d.makeSearchNotesTool({ store, embed })
+    // 联网这两个是**和会话无关**的全局能力（不像文件工具那样有边界要跟着
+    // 项目走），所以留在这里，不进 fs-tools 那个池子。
+    const webSearch = d.makeWebSearchTool(searchKeys)
+    const fetchUrl = d.makeFetchUrlTool()
     const registry: ToolRegistry = {
       ...own.tools,
       [searchTool.name]: searchTool,
+      [webSearch.name]: webSearch,
+      [fetchUrl.name]: fetchUrl,
     }
 
     onStatus({ phase: 'ready', detail: `就绪（${Object.keys(registry).length} 个工具）` })

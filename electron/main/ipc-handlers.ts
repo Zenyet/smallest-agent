@@ -28,6 +28,16 @@ import {
   toPermissionMode,
 } from './providers'
 import { createProviderRegistry } from './provider/registry'
+import { getAgentsState, setAgentsState, agentsStorePath } from './agents-store'
+import {
+  agentForSession,
+  assignAgent,
+  forgetSession as forgetAgentSession,
+  newAgent,
+  removeAgent,
+  upsertAgent,
+  type AgentDef,
+} from './agents'
 import { randomUUID } from 'node:crypto'
 import { forgetSessionTitle, getSessionTitles, setSessionTitle } from './session-titles-store'
 import {
@@ -66,7 +76,7 @@ export function setupIpcHandlers(
   isRestarting: () => boolean,
   broadcast: Broadcast,
   fsPool: FsToolsPool,
-): { runningSessionId: () => string | null; disposeProviders: () => void } {
+): { runningSessionIds: () => string[]; disposeProviders: () => void } {
   const send = (channel: string) => (payload: unknown) => {
     // 窗口可能已被关闭，发送前检查，避免 "Object has been destroyed"
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
@@ -117,6 +127,20 @@ export function setupIpcHandlers(
     },
     resolveCwd: cwdFor,
     resolvePermission: (sessionId) => permissionFor(getProvidersState(), sessionId),
+    resolveAgent: (sessionId) => agentForSession(getAgentsState(), sessionId),
+    // 能被派活的子 agent：所有没停用的。
+    //
+    // 不排除「这个会话自己绑的那个」—— 一个 agent 既可以是主设定也可以被
+    // 派活，两种用途互不冲突（见 subagent.ts 的文件头）。
+    //
+    // SUBAGENT='0' 时返回空数组，而不是在别处判断一次「要不要给 task 工具」：
+    // 空数组会让 makeTaskTool 返回 null，于是那个工具**压根不存在**。
+    // 留一个「存在但一调就说功能关了」的工具更糟 —— 模型会反复重试它。
+    //
+    // 每轮读一次设置（不缓存）：用户在设置里关掉之后，下一轮就该生效，
+    // 而不用重启。同 searchKeys 那个 getter 的理由。
+    resolveSubagents: () =>
+      getSettings().SUBAGENT === '0' ? [] : getAgentsState().agents.filter((a) => !a.disabled),
     fsPool,
   })
 
@@ -135,13 +159,13 @@ export function setupIpcHandlers(
     return accepted
   })
 
-  ipcMain.handle(CH.sendMessage, (_e, sessionId: string, message: string) => {
+  ipcMain.handle(CH.sendMessage, (_e, sessionId: string, message: string, attachments?: any[]) => {
     // 重启过程中拒绝新工作：防止 restartApp 的守卫检查通过后、app.quit() 的
     // before-quit 事件循环间隙里到达的 sendMessage 启动新 turn——那会孤儿化该 turn。
     if (isRestarting()) {
       throw new Error('应用正在重启，无法处理新消息')
     }
-    return runner.run(sessionId, message)
+    return runner.run(sessionId, message, attachments)
   })
   ipcMain.handle(CH.getSettings, () => getSettings())
   ipcMain.handle(CH.saveSettings, (_e, raw: unknown) => {
@@ -232,7 +256,7 @@ export function setupIpcHandlers(
   // 哪些审批还悬着"——这两样事实活在这个模块级的 runner/gate 里，进程没重启
   // 就一直存在，不该只靠事件推送（推送只有"当时在场"才能收到）。
   ipcMain.handle(CH.getRunnerSnapshot, () => ({
-    runningSessionId: runner.runningSessionId(),
+    runningSessionIds: runner.runningSessionIds(),
     pendingApprovals: gate.pending(),
   }))
 
@@ -268,13 +292,13 @@ export function setupIpcHandlers(
     // 为什么不做严格的完成信号：要给 bridge 加一条反向通路，为一个删除时序
     // 不值）。这边不用猜时间 —— runner 就在主进程内，settled() 给的是
     // 那一轮真正的 promise。
-    if (runner.runningSessionId() === id) {
+    if (runner.isBusy(id)) {
       runner.cancel(id)
       // 卡在审批上的话，那一轮停在 gate 里等决定，settled() 会一直悬着。
       // 先把它名下的审批取消掉（fail-closed 结算成拒绝），那一轮才能推进到
       // 下一个轮边界看见取消标志。
       gate.cancelSession(id)
-      await runner.settled()
+      await runner.settled(id)
     }
     // 会话被删了，它名下悬着的审批请求也失去意义——不取消的话会占着串行锁直到超时。
     // 上面那个分支里已经调过一次，这里对没在跑的会话兜底；幂等，重复调用无害。
@@ -298,6 +322,10 @@ export function setupIpcHandlers(
     const beforeProviders = getProvidersState()
     const afterProviders = forgetProviderSession(beforeProviders, id)
     if (afterProviders !== beforeProviders) setProvidersState(afterProviders)
+    // 自定义 agent 的绑定同理
+    const beforeAgents = getAgentsState()
+    const afterAgents = forgetAgentSession(beforeAgents, id)
+    if (afterAgents !== beforeAgents) setAgentsState(afterAgents)
     return deleteSession(paths.sessionsDir, id)
   })
 
@@ -308,11 +336,10 @@ export function setupIpcHandlers(
   // 拒绝在跑的时候砍：那一轮还在往同一个文件里写（onComplete 里的
   // sessions.save 是整体覆写），砍完立刻被它写回来 —— 和删除正在跑的会话
   // 撞的是同一个坑（见上面 deleteSession 那段）。renderer 侧已经用
-  // canEdit 挡了编辑入口，这里是主进程侧的兜底：那个标志是 UI 状态，
-  // 而「谁占着串行锁」的真相在 runner 手里。
+  // canEdit 挡了编辑入口，这里是主进程侧的兜底。
   ipcMain.handle(CH.truncateSession, async (_e, id: string, nthUser: number) => {
     const store = createJsonSessionStore(paths.sessionsDir)
-    if (runner.runningSessionId() === id) return store.load(id)
+    if (runner.isBusy(id)) return store.load(id)
     const truncated = truncateAtNthUser(await store.load(id), nthUser)
     await store.save(id, truncated)
     return truncated
@@ -344,6 +371,49 @@ export function setupIpcHandlers(
     return view
   }
 
+  // --- 自定义 agent ---
+  //
+  // availableTools 从 runtime.registry 取：那是「和会话无关的全局工具」，
+  // 文件工具不在里面（它们按项目目录懒建，见 fs-tools.ts）。所以白名单里
+  // 列不出 write_file 那些 —— 那是个已知的局限，写在设置页的说明里。
+  const agentsView = (sessionId: string) => {
+    const state = getAgentsState()
+    return {
+      agents: state.agents,
+      current: state.sessionAgent[sessionId],
+      availableTools: Object.keys(runtime.registry).sort(),
+      configPath: agentsStorePath(),
+    }
+  }
+
+  const commitAgents = (next: ReturnType<typeof getAgentsState>, sessionId: string) => {
+    setAgentsState(next)
+    const view = agentsView(sessionId)
+    broadcast(CH.agentsChanged, view)
+    return view
+  }
+
+  ipcMain.handle(CH.getAgents, (_e, sessionId: string) => agentsView(sessionId))
+
+  // 新建和改都走这一个：renderer 传完整的 AgentDef，没有 id 就是新建。
+  // 两个 handler 会让 renderer 自己判断「这是新的还是改的」，而那个判断
+  // 在它那边同样要看 id —— 合成一个少一次分叉。
+  ipcMain.handle(CH.saveAgent, (_e, sessionId: string, raw: Partial<AgentDef>) => {
+    const def: AgentDef = raw.id
+      ? (raw as AgentDef)
+      : { ...newAgent(raw.name?.trim() || '新 agent'), ...raw }
+    return commitAgents(upsertAgent(getAgentsState(), def), sessionId)
+  })
+
+  ipcMain.handle(CH.deleteAgent, (_e, sessionId: string, id: string) =>
+    commitAgents(removeAgent(getAgentsState(), id), sessionId),
+  )
+
+  // agentId 传 null = 这个会话不用自定义 agent
+  ipcMain.handle(CH.setSessionAgent, (_e, sessionId: string, agentId: string | null) =>
+    commitAgents(assignAgent(getAgentsState(), sessionId, agentId), sessionId),
+  )
+
   ipcMain.handle(CH.getProviders, (_e, sessionId: string) => providersView(sessionId))
 
   ipcMain.handle(CH.setSessionProvider, (_e, sessionId: string, providerId: string) =>
@@ -368,7 +438,7 @@ export function setupIpcHandlers(
   setupProviderHandlers()
 
   return {
-    runningSessionId: () => runner.runningSessionId(),
+    runningSessionIds: () => runner.runningSessionIds(),
     // app 退出时要收掉那些 npx 子进程 —— 不收的话它们会变成孤儿进程留在
     // 系统里（stdio 的 stderr 是 inherit，父进程没了它们也不会自己退）
     disposeProviders: () => {

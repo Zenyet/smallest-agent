@@ -2,6 +2,8 @@ import { describe, it, expect, vi } from 'vitest'
 import { createAgentRunner, type RunnerDeps } from '../../electron/main/agent-runner'
 import { createApprovalGate } from '../../electron/main/approval'
 import { loadConfig } from '../../src/config'
+import type { Config } from '../../src/types'
+import type { AgentDef } from '../../electron/main/agents'
 import type { Message } from '../../src/types'
 
 const config = loadConfig({ DEEPSEEK_API_KEY: 'k' })
@@ -58,6 +60,126 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): RunnerDeps {
     ...overrides,
   }
 }
+
+describe('自定义 agent 预设', () => {
+  const tools = (): Record<string, { name: string; description: string; parameters: unknown; run: () => Promise<string> }> => ({
+    read_file: { name: 'read_file', description: 'd', parameters: undefined, run: async () => '' },
+    write_file: { name: 'write_file', description: 'd', parameters: undefined, run: async () => '' },
+    web_search: { name: 'web_search', description: 'd', parameters: undefined, run: async () => '' },
+  })
+
+  /** 跑一轮，返回 agent 实际拿到的系统提示和工具名 */
+  async function ranWith(agent: AgentDef | undefined, nativeSearch?: Config['nativeSearch']) {
+    let seenTools: string[] = []
+    let seenPrompt = ''
+    const runner = createAgentRunner(
+      makeDeps({
+        loadConfig: () => ({ ...config, ...(nativeSearch ? { nativeSearch } : {}) }),
+        registry: tools(),
+        resolveAgent: () => agent,
+        runAgent: async (_input, agentDeps) => {
+          seenTools = Object.keys(agentDeps.tools).sort()
+          seenPrompt = agentDeps.config.systemPrompt
+          return 'ok'
+        },
+      }),
+    )
+    await runner.run('s1', 'q')
+    return { seenTools, seenPrompt }
+  }
+
+  it('系统提示被换成 agent 的那个', async () => {
+    const { seenPrompt } = await ranWith({ id: 'a', name: 'n', systemPrompt: '你只审查代码' })
+    expect(seenPrompt).toBe('你只审查代码')
+  })
+
+  // 空字段表示「不管这一项」，不是「设成空」—— 清掉全局提示会让模型失去所有指令
+  it('agent 没填系统提示时用全局那个', async () => {
+    const { seenPrompt } = await ranWith({ id: 'a', name: 'n' })
+    expect(seenPrompt).toBe(config.systemPrompt)
+    expect(seenPrompt).not.toBe('')
+  })
+
+  it('没绑 agent 时行为不变', async () => {
+    const { seenPrompt, seenTools } = await ranWith(undefined)
+    expect(seenPrompt).toBe(config.systemPrompt)
+    expect(seenTools).toEqual(['read_file', 'web_search', 'write_file'])
+  })
+
+  it('工具白名单生效，一个只读 agent 拿不到 write_file', async () => {
+    const { seenTools } = await ranWith({ id: 'a', name: '只读', tools: ['read_file'] })
+    expect(seenTools).toEqual(['read_file'])
+  })
+
+  it('空白名单 = 全部可用', async () => {
+    const { seenTools } = await ranWith({ id: 'a', name: 'n' })
+    expect(seenTools).toEqual(['read_file', 'web_search', 'write_file'])
+  })
+
+  // ## 顺序：先撤 web_search，再过白名单
+  //
+  // 反过来的话，一个白名单里写了 web_search 的 agent 在智谱那种自带搜索的
+  // 厂商下会把它加回来 —— 而那个工具此刻不该存在（厂商自带的会重复）。
+  it('厂商自带搜索时，白名单里写了 web_search 也不该把它加回来', async () => {
+    const { seenTools } = await ranWith(
+      { id: 'a', name: 'n', tools: ['read_file', 'web_search'] },
+      { kind: 'enable-flag' },
+    )
+    expect(seenTools).toEqual(['read_file'])
+  })
+})
+
+describe('厂商自带搜索时撤掉我们的 web_search', () => {
+  // 留着两个不是「多一个选择」而是更差：模型会在两条路之间乱挑，
+  // 而我们那个在没配 Brave/Tavily 时只能搜维基百科 —— 厂商自带的是全网。
+  //
+  // 撤的时机是**每轮**而不是启动时：用户能在 composer 上随时换厂商，
+  // 从智谱切回 DeepSeek 之后我们的 web_search 得回来。
+  const webTools = (): Record<string, { name: string; description: string; parameters: unknown; run: () => Promise<string> }> => ({
+    web_search: { name: 'web_search', description: 'd', parameters: undefined, run: async () => '' },
+    fetch_url: { name: 'fetch_url', description: 'd', parameters: undefined, run: async () => '' },
+  })
+
+  /** 跑一轮，返回 agent 实际拿到的工具名 */
+  async function toolsSeenBy(nativeSearch: Config['nativeSearch']) {
+    let seen: string[] = []
+    const runner = createAgentRunner(
+      makeDeps({
+        loadConfig: () => ({ ...config, ...(nativeSearch ? { nativeSearch } : {}) }),
+        registry: webTools(),
+        runAgent: async (_input, agentDeps) => {
+          seen = Object.keys(agentDeps.tools).sort()
+          return 'ok'
+        },
+      }),
+    )
+    await runner.run('s1', 'q')
+    return seen
+  }
+
+  it('智谱那种（tool-type）撤掉 web_search', async () => {
+    expect(await toolsSeenBy({ kind: 'tool-type', toolType: 'web_search' })).toEqual(['fetch_url'])
+  })
+
+  it('通义那种（enable-flag）也撤', async () => {
+    expect(await toolsSeenBy({ kind: 'enable-flag' })).toEqual(['fetch_url'])
+  })
+
+  // fetch_url 不撤：抓具体网址和搜索是两件事，服务端搜索不覆盖
+  // 「把这个链接读一下」
+  it('不撤 fetch_url', async () => {
+    const seen = await toolsSeenBy({ kind: 'enable-flag' })
+    expect(seen).toContain('fetch_url')
+  })
+
+  it('没有自带搜索的厂商，两个都留着', async () => {
+    expect(await toolsSeenBy(undefined)).toEqual(['fetch_url', 'web_search'])
+  })
+
+  it('kind==="none" 等于没有', async () => {
+    expect(await toolsSeenBy({ kind: 'none' })).toEqual(['fetch_url', 'web_search'])
+  })
+})
 
 describe('createAgentRunner', () => {
   it('跑完发出 complete 事件，带完整答案', async () => {
@@ -117,7 +239,13 @@ describe('createAgentRunner', () => {
     expect(saved[0]).toHaveLength(2)
   })
 
-  it('串行锁：已有任务在跑时再 run，发 BUSY 错误且不启动第二次', async () => {
+  // ## 锁是按会话的，不是全局的
+  //
+  // 原来这条断言的是「s1 在跑时 s2 被拒 BUSY」。那是全局串行锁的行为，
+  // 而它没有正当理由：锁存在的唯一目的是防止会话文件的读-改-写互相覆盖，
+  // 而文件本身就是按会话分开的。全局锁的实际后果是用户没法同时问两个问题 ——
+  // 一个会话在跑，整个 app 的输入框全禁用。那是设计缺陷，不是限制。
+  it('不同会话可以同时跑，不再互相拒绝', async () => {
     const { events, emit } = makeEmitter()
     let started = 0
     let release: () => void = () => {}
@@ -133,16 +261,78 @@ describe('createAgentRunner', () => {
       }),
     )
     const first = runner.run('s1', 'a')
-    // 等一小会儿，让第一个 run 真正进入 runAgent 并阻塞在 gate 上
     await new Promise((r) => setTimeout(r, 10))
-    await runner.run('s2', 'b') // 第二次应立刻被拒
+    const second = runner.run('s2', 'b')
+    await new Promise((r) => setTimeout(r, 10))
+
+    // 两轮都真的开跑了
+    expect(started).toBe(2)
+    expect(events.find((e) => e.type === 'error')).toBeUndefined()
+    expect(runner.isBusy('s1')).toBe(true)
+    expect(runner.isBusy('s2')).toBe(true)
+    expect(runner.runningSessionIds().sort()).toEqual(['s1', 's2'])
+
+    release()
+    await Promise.all([first, second])
+  })
+
+  // 同一个会话仍然要拒绝：会话文件是读-改-写、整体覆写，
+  // 并发两轮会让后写的把前写的盖掉
+  it('同一个会话并发时拒绝第二次（文件会互相覆盖）', async () => {
+    const { events, emit } = makeEmitter()
+    let started = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const runner = createAgentRunner(
+      makeDeps({
+        emit,
+        runAgent: async () => {
+          started++
+          await gate
+          return 'done'
+        },
+      }),
+    )
+    const first = runner.run('s1', 'a')
+    await new Promise((r) => setTimeout(r, 10))
+    await runner.run('s1', 'b')
+
     expect(started).toBe(1)
     expect(events.find((e) => e.type === 'error')?.payload).toMatchObject({
-      sessionId: 's2',
+      sessionId: 's1',
       code: 'BUSY',
     })
     release()
     await first
+  })
+
+  // 锁必须在 run() 里**同步**拿到。挪进 runTurn 的话，那边第一句 await
+  // （sessions.load）之前有一个事件循环空档 —— 同一会话连发两条时两次检查
+  // 都会通过，然后两轮并发读-改-写同一个文件。
+  it('同一会话同一 tick 连发两条，第二条也被拒（锁是同步拿的）', async () => {
+    const { events, emit } = makeEmitter()
+    let started = 0
+    let release: () => void = () => {}
+    const gate = new Promise<void>((r) => (release = r))
+    const runner = createAgentRunner(
+      makeDeps({
+        emit,
+        runAgent: async () => {
+          started++
+          await gate
+          return 'done'
+        },
+      }),
+    )
+    // 不 await，同一 tick 里连发
+    const a = runner.run('s1', 'a')
+    const b = runner.run('s1', 'b')
+    await new Promise((r) => setTimeout(r, 10))
+
+    expect(started).toBe(1)
+    expect(events.find((e) => e.type === 'error')?.payload).toMatchObject({ code: 'BUSY' })
+    release()
+    await Promise.all([a, b])
   })
 
   it('runAgent 抛错时发映射后的错误码，并释放锁', async () => {
@@ -160,7 +350,7 @@ describe('createAgentRunner', () => {
     )
     await runner.run('s1', 'a')
     expect(events.find((e) => e.type === 'error')?.payload).toMatchObject({ code: 'MAX_TURNS' })
-    expect(runner.isBusy()).toBe(false)
+    expect(runner.isBusy('s1')).toBe(false)
     await runner.run('s1', 'b') // 锁已释放，能再跑
     expect(calls).toBe(2)
   })
@@ -323,8 +513,8 @@ describe('createAgentRunner 的取消', () => {
       }),
     )
     await runner.run('s1', '活')
-    expect(runner.isBusy()).toBe(false)
-    expect(runner.runningSessionId()).toBeNull()
+    expect(runner.isBusy('s1')).toBe(false)
+    expect(runner.runningSessionIds()).toEqual([])
   })
 
   it('取消没在跑的会话返回 false，不抛', () => {
@@ -392,15 +582,15 @@ describe('createAgentRunner 的取消', () => {
       finished = true
     })
     // settled() 拿到的是同一个 promise，await 它之后那一轮必须已经收尾
-    await runner.settled()
+    await runner.settled('s1')
     await run
     expect(finished).toBe(true)
-    expect(runner.isBusy()).toBe(false)
+    expect(runner.isBusy('s1')).toBe(false)
   })
 
   it('没在跑时 settled() 立刻返回', async () => {
     const runner = createAgentRunner(makeDeps())
-    await expect(runner.settled()).resolves.toBeUndefined()
+    await expect(runner.settled('s1')).resolves.toBeUndefined()
   })
 
   it('多轮 agent 在下一轮入口停下，不跑完所有轮', async () => {

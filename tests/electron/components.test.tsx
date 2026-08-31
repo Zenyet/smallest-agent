@@ -53,6 +53,55 @@ describe('ToolCallIndicator', () => {
   })
 })
 
+describe('工具卡片的布局稳定性', () => {
+  const ev = { ...toolEvent, args: { q: 'x' }, output: '{"r":1}' }
+
+  // ## 这两条锁的是「点开/收起时整个气泡在抖」
+  //
+  // <pre> 不换行，它的**固有宽度**等于最长那一行。展开时那个宽度会一层层
+  // 传上去，把按内容收缩的气泡撑到上限；一折叠又缩回去。
+  it('有工具卡片时气泡定宽，展开折叠不改变宽度', () => {
+    const { container } = render(<MessageBubble message={msg({ tools: [ev] })} />)
+    const wrapper = container.firstElementChild as HTMLElement
+    // 定宽而不是 w-fit —— 后者跟着内容缩放
+    expect(wrapper.className).toMatch(/\bw-\[76%\]/)
+    expect(wrapper.className).not.toMatch(/\bw-fit\b/)
+  })
+
+  // 没有工具卡片的消息不该被强行拉宽 —— 一句「好的」占满 76% 很难看
+  it('没有工具卡片时按内容收缩', () => {
+    const { container } = render(<MessageBubble message={msg()} />)
+    const wrapper = container.firstElementChild as HTMLElement
+    expect(wrapper.className).toMatch(/\bw-fit\b/)
+  })
+
+  // min-w-0 要贯穿整条祖先链，否则固有宽度仍然往上传
+  it('工具组带 w-full 和 min-w-0，不参与决定气泡宽度', () => {
+    const { container } = render(<MessageBubble message={msg({ tools: [ev] })} />)
+    const group = container.querySelector('.tool-group') as HTMLElement
+    expect(group.className).toMatch(/\bw-full\b/)
+    expect(group.className).toMatch(/\bmin-w-0\b/)
+  })
+
+  // 展开后第一个条目原本紧贴标题按钮，中间没有任何间距
+  it('展开区有上内边距，不紧贴标题按钮', () => {
+    const { container } = render(<MessageBubble message={msg({ tools: [ev] })} />)
+    fireEvent.click(screen.getByRole('button', { name: /本轮 1 次工具调用/ }))
+    const panel = container.querySelector('.tool-group > div:nth-child(2)') as HTMLElement
+    expect(panel.className).toMatch(/\bpt-1\.5\b/)
+  })
+
+  it('<pre> 不撑宽父容器', () => {
+    const { container } = render(<MessageBubble message={msg({ tools: [ev] })} />)
+    fireEvent.click(screen.getByRole('button', { name: /本轮 1 次工具调用/ }))
+    fireEvent.click(screen.getByRole('button', { name: /get_weather/ }))
+    for (const pre of container.querySelectorAll('pre')) {
+      expect(pre.className).toMatch(/\bmin-w-0\b/)
+      expect(pre.className).toMatch(/\bw-full\b/)
+    }
+  })
+})
+
 describe('MessageBubble', () => {
   it('用户消息和助手消息用不同的类名', () => {
     const { container: user } = render(<MessageBubble message={msg({ role: 'user' })} />)
@@ -346,10 +395,9 @@ describe('ChatWindow', () => {
     expect(screen.getByRole('button', { name: /发送/ })).toBeTruthy()
   })
 
-  // 别的会话占着串行锁时不给停止键 —— 那时该点的是横幅上的「去看看」。
-  // 在这里放停止键等于让用户从 A 会话去停 B 会话，而 runner.cancel 也只认
-  // 正在跑的那个 sessionId，点了不会有任何效果。
-  it('被别的会话阻塞时不给停止键', () => {
+  // 这个会话没在跑就不给停止键，跟别的会话在不在跑无关 ——
+  // 锁是按会话的（见 agent-runner.ts），A 在跑不影响 B。
+  it('自己没在跑时不给停止键', () => {
     render(
       <ChatWindow
         chat={idle}
@@ -357,7 +405,6 @@ describe('ChatWindow', () => {
         onSend={() => {}}
         onCancel={() => {}}
         onDecide={() => {}}
-        blockedBy={{ sessionId: 's2', title: '另一个会话', pendingApproval: false }}
       />,
     )
     expect(screen.queryByRole('button', { name: /停止/ })).toBeNull()
@@ -403,18 +450,31 @@ describe('ChatWindow', () => {
     expect(decisions).toEqual(['allow'])
   })
 
-  it('blockedBy 存在时禁用输入框并显示是哪个会话占着串行锁', () => {
+  // ## 这一条锁的是「会话之间不再互相阻塞」
+  //
+  // 原来这里断言的是反面：blockedBy 存在时输入框被禁用、显示一条橙色横幅
+  // 「某会话正在处理中，agent 一次只能处理一个会话」。那来自主进程那把
+  // **全局**串行锁 —— 一个会话在跑，整个 app 的输入框全禁用。
+  //
+  // 锁已经改成按会话（agent-runner.ts 里的 running Set），所以这里反过来：
+  // 这个会话自己空闲时，输入框必须可用，不管别人在不在跑。
+  it('自己空闲时输入框可用（别的会话在跑不影响）', () => {
+    render(<ChatWindow chat={idle} sessionId="s1" onSend={() => {}} onDecide={() => {}} />)
+    expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(false)
+    // 那条「一次只能处理一个会话」的横幅不该再存在
+    expect(screen.queryByText(/一次只能处理一个会话/)).toBeNull()
+  })
+
+  it('自己在跑时才禁用输入框', () => {
     render(
       <ChatWindow
-        chat={idle}
+        chat={{ messages: [], running: true }}
         sessionId="s1"
         onSend={() => {}}
         onDecide={() => {}}
-        blockedBy={{ sessionId: 's2', title: '会话二', pendingApproval: false }}
       />,
     )
     expect((screen.getByRole('textbox') as HTMLTextAreaElement).disabled).toBe(true)
-    expect(screen.getByText(/会话二/)).toBeTruthy()
   })
 
   it('消息数少于上限时不显示「显示更早」按钮', () => {

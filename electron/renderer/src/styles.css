@@ -217,6 +217,23 @@
     }
   }
 
+  /* 只淡入、不位移。
+   *
+   * 给「内容可能很大」的块用（工具调用的展开区里有几百个节点）：
+   * transform 会让浏览器为整块建合成层并逐帧重绘，那个代价随节点数增长；
+   * opacity 是纯合成属性，不触发 layout 也不触发 paint。
+   *
+   * 视觉上少了 8px 的上移，换来展开不卡 —— 在这种块上那个位移本来也
+   * 看不太出来（它一出现就占满整行）。 */
+  @keyframes fade-in-only {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+
   /* 淡入 */
   @keyframes fade-in {
     from { opacity: 0; }

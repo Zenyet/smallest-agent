@@ -18,10 +18,49 @@ import {
   SECTIONS,
   hint,
   label,
+  BOOLEAN_FIELDS,
   type SectionId,
 } from '../settings-fields'
 import type { ProviderDetection, ProvidersView } from '../../../shared/channels'
 import { api } from '../api'
+
+/**
+ * 开关。
+ *
+ * 原生 checkbox + role="switch"：可访问性上它就是个开关，而自绘一个 div
+ * 要自己补键盘操作和焦点环。
+ *
+ * 抽成组件是因为有两处要用（「高级参数」的展开开关、通用设置里那两个
+ * 0/1 字段），复制一份迟早分叉。
+ */
+function Switch({
+  checked,
+  onChange,
+  label,
+}: {
+  checked: boolean
+  onChange: (next: boolean) => void
+  label: string
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      onClick={() => onChange(!checked)}
+      className={`relative flex h-[18px] w-[32px] flex-none cursor-pointer items-center rounded-full border-none px-0.5 transition-colors duration-150 ${
+        checked ? 'bg-accent' : 'bg-field'
+      }`}
+    >
+      <span
+        className={`block size-[14px] rounded-full bg-page transition-transform duration-150 ${
+          checked ? 'translate-x-[14px]' : 'translate-x-0'
+        }`}
+      />
+    </button>
+  )
+}
 
 export function SettingsPanel({
   settings,
@@ -176,7 +215,7 @@ export function SettingsPanel({
    */
   const renderField = (key: string, divider: boolean) => {
     const isRestartField = (RESTART_REQUIRED as readonly string[]).includes(key)
-    const isBooleanField = key === 'STREAM' || key === 'LLM_CACHE'
+    const isBooleanField = BOOLEAN_FIELDS.has(key)
     const isSecret = key.endsWith('_API_KEY')
     const text = label(key)
     const h = hint(key)
@@ -187,7 +226,13 @@ export function SettingsPanel({
         // 居中会让输入框飘到中间、跟标题对不上
         className={`flex items-start gap-4 py-3 ${divider ? 'border-t border-line' : ''}`}
       >
-        <label htmlFor={`setting-${key}`} className="field flex min-w-0 flex-1 flex-col gap-[3px]">
+        {/* 布尔字段没有 input，htmlFor 会指向一个不存在的 id ——
+            那样点标题不会聚焦到任何东西。开关自己带 aria-label，
+            所以这里对布尔行不设 htmlFor。 */}
+        <label
+          htmlFor={isBooleanField ? undefined : `setting-${key}`}
+          className="field flex min-w-0 flex-1 flex-col gap-[3px]"
+        >
           <span className="flex items-center gap-1">
             <span className="text-[12.5px] font-medium text-ink">{text || key}</span>
             {REQUIRED.includes(key) && <span className="text-[12.5px] text-red">*</span>}
@@ -197,17 +242,35 @@ export function SettingsPanel({
           {text && <span className="font-mono text-[11px] text-ink-3">{key}</span>}
           {h && <span className="text-[11.5px] text-ink-3">{h}</span>}
         </label>
-        {/* 输入框定宽而不是 flex-1：所有输入框右边缘要对齐，
-            flex-1 会让它随左列文字长短伸缩、宽度参差不齐 */}
-        <input
-          id={`setting-${key}`}
-          aria-label={key}
-          aria-describedby={needsRestart && isRestartField ? 'restart-warning' : undefined}
-          type={isSecret ? 'password' : 'text'}
-          value={draft[key] ?? ''}
-          onChange={(e) => persistField(key, e.target.value, isBooleanField)}
-          className="h-7 w-[300px] flex-none rounded-control bg-field px-2.5 font-[inherit] text-[13px] text-ink shadow-inset-field placeholder:text-ink-3 focus:outline-2 focus:outline-offset-[-1px] focus:outline-accent"
-        />
+        {/* 布尔字段用开关，不是让用户填 0/1。
+            那两个键在磁盘上确实存 '0'/'1'（src/config.ts 读的是
+            `env.STREAM !== '0'`），但那是**存储格式**，不该泄漏到界面上 ——
+            用户面对的是「要不要流式输出」，不是「填 0 还是填 1」。
+            开关右对齐到和输入框同一条边，否则这一行看着像没对齐。 */}
+        {isBooleanField ? (
+          /* justify-end：开关贴**右**边，和输入框的右边缘对齐。
+             左对齐的话它会跟输入框的左边缘对齐，而开关只有 32px 宽 ——
+             右边空出 268px，那一行看着像没填完。 */
+          <div className="flex h-7 w-[300px] flex-none items-center justify-end">
+            <Switch
+              checked={draft[key] !== '0'}
+              onChange={(next) => persistField(key, next ? '1' : '0', true)}
+              label={key}
+            />
+          </div>
+        ) : (
+          /* 输入框定宽而不是 flex-1：所有输入框右边缘要对齐，
+             flex-1 会让它随左列文字长短伸缩、宽度参差不齐 */
+          <input
+            id={`setting-${key}`}
+            aria-label={key}
+            aria-describedby={needsRestart && isRestartField ? 'restart-warning' : undefined}
+            type={isSecret ? 'password' : 'text'}
+            value={draft[key] ?? ''}
+            onChange={(e) => persistField(key, e.target.value, isBooleanField)}
+            className="h-7 w-[300px] flex-none rounded-control bg-field px-2.5 font-[inherit] text-[13px] text-ink shadow-inset-field placeholder:text-ink-3 focus:outline-2 focus:outline-offset-[-1px] focus:outline-accent"
+          />
+        )}
       </div>
     )
   }
@@ -322,22 +385,11 @@ export function SettingsPanel({
                     </div>
                     {/* 原生 checkbox + role=switch：可访问性上它就是个开关，
                         而自绘一个 div 要自己补键盘操作和焦点环 */}
-                    <button
-                      type="button"
-                      role="switch"
-                      aria-checked={showAdvanced}
-                      aria-label="高级参数"
-                      onClick={() => setShowAdvanced((v) => !v)}
-                      className={`relative flex h-[18px] w-[32px] flex-none cursor-pointer items-center rounded-full border-none px-0.5 transition-colors duration-150 ${
-                        showAdvanced ? 'bg-accent' : 'bg-field'
-                      }`}
-                    >
-                      <span
-                        className={`block size-[14px] rounded-full bg-page transition-transform duration-150 ${
-                          showAdvanced ? 'translate-x-[14px]' : 'translate-x-0'
-                        }`}
-                      />
-                    </button>
+                    <Switch
+                      checked={showAdvanced}
+                      onChange={setShowAdvanced}
+                      label="高级参数"
+                    />
                   </div>
                   {showAdvanced && (
                     <div className="flex flex-col border-t border-line">

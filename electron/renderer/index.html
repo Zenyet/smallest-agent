@@ -2,8 +2,13 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
+    <!-- img-src 带 data:：附件里的图片缩略图是 FileReader 读出来的 data URI，
+         不加这一条会落到 default-src 'self' 上被拦掉（控制台报 CSP 违规，
+         界面上只是一个碎图占位，很难看出是 CSP 干的）。
+         只放开 data:，不放开 http(s): —— 远程图片没有需求，
+         而允许它等于让任意消息内容能往外发请求。 -->
     <meta http-equiv="Content-Security-Policy"
-          content="default-src 'self'; style-src 'self' 'unsafe-inline'" />
+          content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:" />
     <title>Smallest Agent</title>
   </head>
   <body>

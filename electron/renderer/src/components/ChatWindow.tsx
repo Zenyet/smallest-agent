@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { MessageBubble } from './MessageBubble'
 import { ProviderPicker } from './ProviderPicker'
 import { PermissionPicker } from './PermissionPicker'
@@ -8,12 +8,15 @@ import { LoadingState } from './LoadingState'
 import { ThinkingState } from './ThinkingState'
 import { Icon } from './Icon'
 import { ModelPicker } from './ModelPicker'
+import { AttachmentButton, AttachmentStrip, acceptFiles } from './AttachmentPicker'
+import { useFileDrop } from '../use-file-drop'
 import type { VendorEntry } from '../../../main/vendors'
 import { visibleRange } from '../visible-window'
 import type { SessionChat } from '../chat-reducer'
 import type { PermissionMode } from '../../../main/providers'
 import type { ProvidersView } from '../../../shared/channels'
 import type { ApprovalDecision, ErrorCode } from '../../../shared/channels'
+import type { ContentPart } from '../../../../src/types'
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
   API_KEY_MISSING: '请在设置中配置 DeepSeek API Key',
@@ -26,15 +29,12 @@ const ERROR_TEXT: Record<ErrorCode, string> = {
   UNKNOWN: '出错了',
 }
 
-// agent 是全局串行的（一个进程一次只跑一个 session），所以「另一个会话正在跑」
-// 会让*这个*会话的composer也被禁用。别只给个模糊的「正在思考…」——那是当前
-// 会话自己在跑时的文案，用在别的会话头上会让用户以为卡死了，找不到原因也没法解开。
-// blockedBy 由 App.tsx 算出「是不是别的会话占着串行锁」，连同去处一起交下来。
-export interface BlockedBy {
-  sessionId: string
-  title: string
-  pendingApproval: boolean
-}
+// 会话之间是并发的：A 在跑不影响 B 的 composer。
+//
+// 原来这里有个 BlockedBy 接口 + 一条橙色横幅（「某会话正在处理中，agent 一次
+// 只能处理一个会话」），因为主进程那把串行锁是全局的。那把锁已经改成按会话了
+// （见 agent-runner.ts），横幅和它背后那套「谁占着锁」的推算随之全部删掉 ——
+// 留着只会显示一个不存在的限制。
 
 export function ChatWindow({
   chat,
@@ -42,8 +42,6 @@ export function ChatWindow({
   onSend,
   onCancel,
   onDecide,
-  blockedBy,
-  onJumpToBlocking,
   modelCatalog,
   currentVendor,
   currentModel,
@@ -60,8 +58,6 @@ export function ChatWindow({
   // 停止这个会话正在跑的那一轮。可选：设置窗口那类地方不需要。
   onCancel?: () => void
   onDecide: (decision: ApprovalDecision) => void
-  blockedBy?: BlockedBy
-  onJumpToBlocking?: () => void
   // 模型选择器（composer 左下角）。四个一起给才渲染 —— 设置窗口那类
   // 只读用法不传，composer 就退回「只有发送键」的老样子。
   modelCatalog?: VendorEntry[]
@@ -81,8 +77,15 @@ export function ChatWindow({
 }) {
   const [text, setText] = useState('')
   const [showAll, setShowAll] = useState(false)
+  const [attachments, setAttachments] = useState<ContentPart[]>([])
+  // 附件被拒的原因（类型不认 / 超 20MB / 读不出）。不用 alert：
+  // 那是个模态框，多选时每个坏文件弹一次，得连点好几下才回得到输入框。
+  const [attachError, setAttachError] = useState<string | null>(null)
   const endRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const scrollContainerRef = useRef<HTMLDivElement>(null)
+  const [isNearBottom, setIsNearBottom] = useState(true)
+  const userScrolledRef = useRef(false)
 
   // showAll 是展开状态，属于"当前打开的那个会话"，不能泄露到切换后的新会话。
   // 不能用 key={sessionId} 让整个组件重挂，那会丢掉 text（用户打到一半的输入）。
@@ -95,24 +98,59 @@ export function ChatWindow({
   // 只能靠这条注释守住 —— 别改回 useEffect。
   useLayoutEffect(() => {
     setShowAll(false)
+    setIsNearBottom(true)
+    userScrolledRef.current = false
+    // 附件和 showAll 同理，属于「当前打开的那个会话」。不清的话在 A 会话
+    // 挂的图会跟到 B 会话发出去 —— 而用户在 B 里根本没见过它。
+    setAttachments([])
+    setAttachError(null)
   }, [sessionId])
 
-  // 新消息到达时滚到底部
+  // 监听用户滚动，判断是否在底部附近（距离底部 < 150px 视为「接近底部」）
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [chat.messages])
+    const container = scrollContainerRef.current
+    if (!container) return
+
+    const handleScroll = () => {
+      const { scrollTop, scrollHeight, clientHeight } = container
+      const distanceToBottom = scrollHeight - scrollTop - clientHeight
+      const nearBottom = distanceToBottom < 150
+
+      // 用户主动向上滚动时标记（非程序触发的滚动）
+      if (!nearBottom && userScrolledRef.current === false) {
+        userScrolledRef.current = true
+      }
+      // 用户滚回底部附近时恢复自动滚动
+      if (nearBottom && userScrolledRef.current === true) {
+        userScrolledRef.current = false
+      }
+
+      setIsNearBottom(nearBottom)
+    }
+
+    container.addEventListener('scroll', handleScroll, { passive: true })
+    return () => container.removeEventListener('scroll', handleScroll)
+  }, [])
+
+  // 新消息到达时，只在用户位于底部附近时才自动滚动
+  useEffect(() => {
+    if (isNearBottom) {
+      endRef.current?.scrollIntoView({ behavior: 'smooth' })
+    }
+  }, [chat.messages, isNearBottom])
 
   // 输入框随内容自动增高，封顶后转为内部滚动。手法抄自 bui-reference 的
   // PromptBar.tsx:326-330——高度先归零再读 scrollHeight，是因为不归零的话
   // 内容变短时 scrollHeight 会被旧高度撑住，量不出「应该缩回去」的真实值。
-  // maxHeight=200：这是桌面窗口（760px 高），composer 不该吃掉对话区——
-  // 200px 大约是 9-10 行折行文字，够粘一段长文本，占比不到窗口高度的三分之一，
+  // minHeight=42：初始 2 行高度，给用户更多输入空间
+  // maxHeight=300：这是桌面窗口（760px 高），composer 不该吃掉对话区——
+  // 300px 大约是 14-15 行折行文字，够粘一段长文本，占比不到窗口高度的一半，
   // 剩下的仍然主要留给消息列表。
   useLayoutEffect(() => {
     const el = textareaRef.current
     if (!el) return
-    const minHeight = 28
-    const maxHeight = 200
+    const minHeight = 42
+    const maxHeight = 300
     el.style.height = '0px'
     const contentHeight = el.scrollHeight
     el.style.height = `${Math.min(Math.max(contentHeight, minHeight), maxHeight)}px`
@@ -123,27 +161,37 @@ export function ChatWindow({
   // 自己声明的清单（走 CliModelPicker），权限它自己管（见 PermissionPicker 文件头）
   const isBuiltin = !providers || providers.current === 'builtin'
 
-  const blocked = chat.running || Boolean(blockedBy)
+  // 只看**这个**会话自己在不在跑。别的会话在跑跟这里无关 —— 锁是按会话的。
+  const blocked = chat.running
   const canSend = !blocked && text.trim().length > 0
-  // 只在**这个**会话自己在跑时给停止键。别的会话占着串行锁时（blockedBy）
-  // 不给 —— 那时该点的是横幅上的「去看看」，在这里放停止键等于让用户
-  // 从 A 会话去停 B 会话，而 runner.cancel 也只认正在跑的那个 sessionId。
   const canStop = chat.running && Boolean(onCancel)
+
+  // 拖进来的文件走和「点按钮选」完全同一份校验（acceptFiles），
+  // 不各写一份 —— 见 AttachmentPicker.tsx 里那个函数的注释。
+  const takeFiles = useCallback(
+    (files: File[]) => {
+      setAttachError(null)
+      void acceptFiles(files, (att) => setAttachments((prev) => [...prev, att]), setAttachError)
+    },
+    [],
+  )
+  // 跑起来时不收：那一轮的请求已经发出去了，这时候收下的东西只会静默
+  // 留在下一条消息上，而用户以为它进了当前这轮
+  const { dragging, dropProps } = useFileDrop(takeFiles, blocked)
 
   const submit = () => {
     if (!canSend) return
+    // TODO: 实现附件支持后取消注释
+    // onSend(text.trim(), attachments)
     onSend(text.trim())
     setText('')
+    setAttachments([])
+    setAttachError(null)
   }
 
   const placeholder = (): string => {
     if (chat.pendingApproval) return '等待你确认上方的写操作…'
     if (chat.running) return '正在思考…'
-    if (blockedBy) {
-      return blockedBy.pendingApproval
-        ? `等待你确认「${blockedBy.title}」里的写操作…`
-        : `「${blockedBy.title}」正在处理中，请稍候…`
-    }
     // 内置 agent 且未分组会话：文件工具不可用
     if (isBuiltin && providers && !providers.projectPath) {
       return '未分组会话的文件工具不可用，请在左上角选择项目'
@@ -166,8 +214,11 @@ export function ChatWindow({
   const liveIdle = chat.running && !liveThinking && !liveStreamingText
 
   return (
-    <section className="chat flex min-w-0 flex-1 flex-col">
-      <div className="chat__scroll flex flex-1 flex-col gap-2.5 overflow-y-auto px-8 py-6">
+    // 整个对话区都是投放区，不只 composer：用户拖着图过来时视线在对话
+    // 内容上，让他去瞄准底部那条窄输入框是多余的精确操作。
+    // relative 是给下面那层覆盖提示定位用的。
+    <section className="chat relative flex min-w-0 flex-1 flex-col" {...dropProps}>
+      <div ref={scrollContainerRef} className="chat__scroll flex flex-1 flex-col gap-2.5 overflow-y-auto px-8 py-6">
         {hiddenCount > 0 && (
           <button
             onClick={() => setShowAll(true)}
@@ -187,17 +238,15 @@ export function ChatWindow({
             // 下标要加回 start：slice 之后 i 是窗口内的位置，
             // 而截断要的是它在完整 messages 里的位置
             onEditResend={onEditResend && ((text) => onEditResend(start + i, text))}
-            // 跑起来时不许编辑：那一轮还在往 messages 里写，之后的截断会和它打架。
-            // blockedBy 那种「别的会话占着锁」也不行 —— 重发要发起新一轮，
-            // 而串行锁不区分会话，发出去只会拿到 BUSY
-            canEdit={!chat.running && !blockedBy}
+            // 跑起来时不许编辑：那一轮还在往 messages 里写，之后的截断会和它打架
+            canEdit={!chat.running}
           />
         ))}
         {/* 实时指示：有可展开的工具轨迹就露 ThinkingState，否则（纯等待）用像素加载器。
             两者都在窗口化 slice 之外 —— 它们只属于"现在正在发生的这一轮"，不受
             「显示更早的消息」窗口影响（窗口折叠的是历史，不是当下） */}
         {liveThinking && <ThinkingState tools={lastMsg!.tools} />}
-        {liveIdle && <LoadingState />}
+        {liveIdle && <LoadingState startedAt={chat.startedAt} />}
         {chat.pendingApproval && <ApprovalCard request={chat.pendingApproval} onDecide={onDecide} />}
         {chat.error && (
           <p className="chat__error rounded-card bg-red-tint px-2.5 py-1.5 text-[12.5px] text-red shadow-hairline">
@@ -208,31 +257,21 @@ export function ChatWindow({
         <div ref={endRef} />
       </div>
 
-      {blockedBy && (
-        // 用户必须能从这里够到那个悬着的审批，否则只能干等最长 5 分钟的超时。
-        <div className="chat__blocked mx-8 mb-2.5 flex items-center gap-2 rounded-card bg-orange-tint px-2.5 py-1.5 text-[12.5px] text-orange shadow-hairline">
-          <span>
-            {blockedBy.pendingApproval
-              ? `等待你确认「${blockedBy.title}」里的写操作，agent 一次只能处理一个会话`
-              : `「${blockedBy.title}」正在处理中，agent 一次只能处理一个会话`}
-          </span>
-          {onJumpToBlocking && (
-            <button
-              onClick={onJumpToBlocking}
-              className="chat__blocked-jump ml-auto flex h-7 cursor-pointer items-center rounded-control border-none bg-surface px-3 text-[12px] font-medium text-ink shadow-btn transition-[background-color,transform] duration-150 hover:bg-hover active:scale-[0.97]"
-            >
-              前往处理
-            </button>
-          )}
-        </div>
-      )}
-
       {/* composer 是一张卡片（rounded-card + shadow-card 的 hairline ring），
           不再是「输入框贴一个按钮」的裸拼接——文字区在上，控件行在下，跟
           目标截图的结构对齐。焦点态挪到卡片外框上（focus-within），呼应
           组件语言里「聚焦态用一圈柔和描边而非阴影加深」的建议。 */}
       <div className="border-t border-line px-8 pt-2.5 pb-5">
         <div className="flex flex-col gap-1 rounded-card bg-surface p-2 shadow-card transition-[outline-color] duration-150 focus-within:outline-2 focus-within:outline-offset-[-1px] focus-within:outline-accent">
+          {/* 附件预览在输入框**上方**：先看到带了什么，再看到说了什么。
+              放在下面那行控件里会把 h-7 的选择器行撑到两倍高。 */}
+          <AttachmentStrip
+            attachments={attachments}
+            onRemove={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
+          />
+          {attachError && (
+            <p className="px-1 pb-0.5 text-[11.5px] font-normal text-red">{attachError}</p>
+          )}
           <textarea
             ref={textareaRef}
             value={text}
@@ -240,8 +279,21 @@ export function ChatWindow({
             placeholder={placeholder()}
             rows={1}
             onChange={(e) => setText(e.target.value)}
+            // textarea 对文件有自己的默认行为：Chromium 会把拖进来的文件
+            // **路径当文字**插进输入框。不拦的话拖一张图到输入框里，得到的
+            // 是一行 /Users/…/shot.png，而附件区什么都没有。
+            // 拦掉之后事件继续冒泡到 section 上，由那边的 dropProps 收。
+            onDrop={(e) => e.preventDefault()}
             onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.shiftKey) {
+              // isComposing：输入法正在拼字时那个回车是**确认候选词**，不是发送。
+              // 不挡的话中文/日文输入法下打一个词按回车选字就把半成品发出去了 ——
+              // 用户完全没有「我要发送」的意图。
+              //
+              // 读 nativeEvent.isComposing 而不是自己接 compositionstart/end：
+              // 那两个事件和 keydown 的先后顺序各平台不一致（Safari 的
+              // compositionend 在 keydown 之后），自己维护一个 boolean 会在
+              // 边界上错判。isComposing 是浏览器在事件对象上直接给的答案。
+              if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
                 e.preventDefault()
                 submit()
               }
@@ -266,6 +318,17 @@ export function ChatWindow({
                 ProviderPicker 换引擎时一起换），而权限是内置 agent 专有的 ——
                 CLI 自带权限模型，我们管不住它，放一个只会让人误以为能管。 */}
             <div className="flex min-w-0 items-center gap-0.5">
+              {/* 附件入口放在最左：它回答的是「这条消息带什么」，比
+                  「谁来跑/用哪个模型」更靠近内容本身 */}
+              <AttachmentButton
+                onAdd={(att) => {
+                  setAttachments((prev) => [...prev, att])
+                  // 上一次的报错要在成功一次之后消失，否则那行红字会一直挂着
+                  setAttachError(null)
+                }}
+                onReject={setAttachError}
+                disabled={blocked}
+              />
               {providers && onPickProvider && (
                 <ProviderPicker view={providers} onPick={onPickProvider} />
               )}
@@ -315,6 +378,27 @@ export function ChatWindow({
           </div>
         </div>
       </div>
+
+      {/* 拖拽悬停提示。
+          pointer-events-none 是**必须**的：这层盖在整个对话区上，能收事件
+          的话鼠标一进来就等于「离开了 section」—— dragleave 立刻触发，
+          提示闪一下就没，drop 也落不到 section 上。
+          用 inset-2 留一圈边距而不是铺满：边缘留白让那圈虚线看得出是
+          「一个投放区」，而不是整个窗口变了色。 */}
+      {dragging && (
+        <div
+          className="chat__dropzone pointer-events-none absolute inset-2 z-10 flex items-center justify-center rounded-card bg-page/75 backdrop-blur-[2px]"
+          style={{ animation: 'fade-in-only 120ms ease-out both' }}
+        >
+          <div className="flex flex-col items-center gap-2 rounded-card border-2 border-dashed border-accent bg-surface/90 px-6 py-5 shadow-raised">
+            <span className="text-accent">
+              <Icon name="image" size={22} strokeWidth={1.9} />
+            </span>
+            <span className="text-[13px] text-ink">松手添加附件</span>
+            <span className="text-[11.5px] font-normal text-ink-3">图片、PDF、文本文件</span>
+          </div>
+        </div>
+      )}
     </section>
   )
 }

@@ -1,68 +1,55 @@
 import { useEffect, useState } from 'react'
 import { Icon } from './Icon'
 
-// 像素网格加载器：agent 正在跑、但还没有可显示的流式文字或思考轨迹时出现
-// （比如刚发送、第一段回答还在模型输出，或夹在两次工具调用之间的空洞里）。
-// 刻意做得"像在干活"而不是"像转圈等死"：一个 4×4 的像素格子在逐格点亮，
-// 旁边附一个等宽字体的秒表，告诉用户已经等了多久、还在向前走。
-const GRID = 4
-
-// 每个格子的动画延迟做成蛇形递进（隔行反向），视觉上像光在一格一格扫过棋盘
-function delayFor(row: number, col: number, size: number): number {
-  const snake = row % 2 === 0 ? col : size - 1 - col
-  return row * size * 90 + snake * 90
-}
-
-export function LoadingState() {
-  // 秒表从挂载起计时：这个组件只在 running 且无输出时存在，挂载点就是"这段等待"的起点。
-  // 数据契约里没有"这一轮从几点开始"，用本地计时更诚实，不发明字段。
-  const [elapsed, setElapsed] = useState(0)
+// agent 正在跑、但还没有可显示的流式文字或思考轨迹时出现（刚发送、第一段
+// 回答还在模型那边，或夹在两次工具调用之间的空洞里）。
+//
+// ## 形态：一行，图标在文字左边
+//
+// 原来是一张 76% 宽的卡片，里面塞了一个 4×4 的像素网格加载器 + 两行文字。
+// 那个体量对「还没有任何内容」这件事来说太重了 —— 它比一条真实的短回答还
+// 显眼，而它承载的信息只有「在跑」和「等了多久」。现在压成一行：
+// 一个转动的图标 + 一句话 + 秒数，跟消息气泡对齐但不假装自己是气泡。
+//
+// ## 秒表为什么读 startedAt 而不是自己数
+//
+// 原来是 `useState(0)` + setInterval，从**组件挂载**起算。那把「这一轮开始
+// 于何时」和「这个组件何时被创建」划了等号 —— 而后者会因为纯 UI 的原因反复
+// 发生：切走再切回，ChatWindow 重新挂载，秒表归零。用户看到「等了 40 秒，
+// 切个会话回来变成 2 秒」。
+//
+// 现在起点记在会话桶里（chat-reducer 的 startedAt），这里只负责每秒重算
+// 一次「现在 - 起点」。跟组件生命周期彻底解耦。
+export function LoadingState({ startedAt }: { startedAt?: number }) {
+  // 存 now 而不是 elapsed：elapsed 那种写法是「每秒 +1」，本质上还是在自己
+  // 计数，切走那段时间没跑的 tick 就永远补不回来（切回来接着从旧值 +1）。
+  // 存时间戳则每次都从真实时钟重算，漏掉的 tick 自动补齐。
+  const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
-    const id = setInterval(() => setElapsed((s) => s + 1), 1000)
+    const id = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(id)
   }, [])
 
+  // startedAt 缺失时不显示秒数，而不是显示 0s 或 NaN。
+  // 缺失是真实存在的情况：reload 之后主进程只知道「这个会话在跑」，
+  // 不知道它是什么时候开始的。
+  const elapsed = startedAt === undefined ? null : Math.max(0, Math.floor((now - startedAt) / 1000))
+
   return (
     <div
-      className="flex max-w-[76%] flex-col gap-2 rounded-card bg-surface px-3 py-2.5 shadow-card"
+      className="loading-state flex w-fit items-center gap-2 self-start px-1 py-1 text-[12.5px]"
       role="status"
       aria-live="off"
     >
-      <div className="flex items-center gap-2">
-        {/* 像素网格：static grid，每格一个会自己淡入淡出的方块 */}
-        <div
-          className="grid size-9 shrink-0 place-items-center self-start rounded-chip bg-inset shadow-inset-field"
-          aria-hidden
-        >
-          <div className="grid grid-cols-4 gap-px p-2">
-            {Array.from({ length: GRID * GRID }).map((_, i) => {
-              const row = Math.floor(i / GRID)
-              const col = i % GRID
-              return (
-                <span
-                  key={i}
-                  className="size-1 rounded-[1px] bg-accent"
-                  style={{ animation: `pixel-on 1s ease-in-out infinite`, animationDelay: `${delayFor(row, col, 4)}ms` }}
-                />
-              )
-            })}
-          </div>
-        </div>
-
-        <div className="flex flex-col">
-          {/* shimmer 占位文本：等宽基准，宽度贴合"小思考中…"这类短语 */}
-          <span
-            className="animate-shimmer bg-[linear-gradient(90deg,var(--color-ink-2)_25%,var(--color-accent)_50%,var(--color-ink-2)_75%)] bg-[length:200%_100%] bg-clip-text text-[12.5px] font-medium text-transparent"
-          >
-            Agent 正在处理…（思考、检索、加工具）
-          </span>
-          {/* 等宽秒表：精确到秒，让人一眼判断"这等待是否异常地久" */}
-          <span className="mt-0.5 font-mono text-[11px] tabular-nums text-ink-3">
-            <Icon name="think" size={11} className="mr-1 inline-block animate-spin-slow align-[-1.5px] text-accent" />
-            已等待 {elapsed}s
-          </span>
-        </div>
-      </div>
+      {/* 图标在最左，跟文字同一基线 —— 用户要的「文本左侧的 loading icon」 */}
+      <Icon name="think" size={13} className="shrink-0 animate-spin-slow text-accent" />
+      {/* shimmer 让这行字自己看着在动，比静态灰字更像「在干活」 */}
+      <span className="animate-shimmer bg-[linear-gradient(90deg,var(--color-ink-2)_25%,var(--color-accent)_50%,var(--color-ink-2)_75%)] bg-[length:200%_100%] bg-clip-text text-transparent">
+        Agent 正在处理
+      </span>
+      {elapsed !== null && (
+        <span className="font-mono text-[11px] tabular-nums text-ink-3">{elapsed}s</span>
+      )}
     </div>
   )
 }

@@ -67,6 +67,30 @@ export interface AcpDeps {
 }
 
 /** 把 ContentBlock 里的文字取出来。非文本块（图片、资源）给一个占位。 */
+/**
+ * ACP 那侧的 sessionId → 我们这侧正在跑的那一轮属于哪个会话。
+ *
+ * 见 createAcpProvider 里 slots 的注释。
+ */
+export type TurnSlots = Map<string, { sessionId: string }>
+
+/**
+ * 一个权限请求该记到我们哪个会话名下。查不到返回 null（调用方拒绝它）。
+ *
+ * ## 为什么单独抽出来
+ *
+ * 这行逻辑原来长在连接回调里（onRequest 的闭包），从外面测不到 —— 要测得
+ * 起一个真的子进程、走完握手。而它恰恰是并发之后最容易错的一处：拿错了
+ * 会把 A 会话的写文件确认框弹到 B 会话头上，而这种错误在界面上看起来像
+ * 「审批框串台」，不像一个归属查询的 bug。
+ */
+export function resolveTurnOwner(
+  slots: TurnSlots,
+  acpSessionId: string,
+): { sessionId: string } | null {
+  return slots.get(acpSessionId) ?? null
+}
+
 function blockText(block: acp.ContentBlock): string {
   if (block.type === 'text') return block.text
   // 图片/音频/资源链接：正文里放一个标记，比静默丢掉好 ——
@@ -142,14 +166,26 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
   /** 我们的 sessionId → ACP 的 ActiveSession */
   const sessions = new Map<string, acp.ActiveSession>()
   /**
-   * 正在跑的那一轮的审批落点。
+   * 正在跑的那些轮次的审批落点，按 ACP 那侧的 sessionId 索引。
    *
    * 权限请求的 handler 在**连接建立时**就注册好了（onRequest 是连接级的），
-   * 而「这次审批属于哪个会话」每轮不同。所以放一个格子，每轮换里面的东西。
-   * gpui 侧同一处用 `Arc<Mutex<Option<TurnSlot>>>`，这边不需要锁 ——
-   * 主进程是单线程事件循环。
+   * 而「这次审批属于哪个会话」每轮不同，所以需要一张表把它找回来。
+   *
+   * ## 为什么是 Map 而不是一个格子
+   *
+   * 原来这里是 `let slot: { sessionId } | null`，每轮覆盖里面的东西。那在
+   * 全局串行锁下是对的 —— 同时只可能有一轮。但锁已经改成按会话的
+   * （agent-runner.ts），而 provider 实例按 (provider, 模型) 缓存、**多个会话
+   * 共用一条连接**：两个会话都走 Claude Code 时会同时有两轮在跑，后开的那轮
+   * 把格子覆盖掉，于是前一轮的权限请求被记到后一个会话名下 —— 用户在 B 会话
+   * 看到一个 A 会话要写文件的确认框，点了之后 A 那边才动。
+   *
+   * 用 ACP 的 sessionId 当键而不是我们的：权限请求里带的是那一个
+   * （c.params.sessionId），我们的 id 在那个载荷里不存在。
+   *
+   * 不需要锁 —— 主进程是单线程事件循环。
    */
-  let slot: { sessionId: string } | null = null
+  const slots: TurnSlots = new Map()
 
   /** 起子进程 + 握手。只在第一次对话时做（懒建）。 */
   async function ensureConnected(): Promise<acp.ClientContext> {
@@ -195,9 +231,14 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
         //
         // **不能自动批准**（SDK 的例子那么做，但那是例子）—— 自动批准等于
         // 绕过用户对这些 CLI 权限模型的预期：他以为 Claude Code 会问他。
-        const current = slot
+        // 按请求里带的 ACP sessionId 查这一轮属于我们哪个会话。
+        //
+        // 不能用「当前那一轮」—— 多个会话共用一条连接时同时会有几轮在跑
+        // （锁按会话，见 agent-runner.ts），拿错了会把 A 的写文件确认框
+        // 弹到 B 会话头上。
+        const current = resolveTurnOwner(slots, c.params.sessionId)
         if (!current) {
-          // 没有正在跑的轮次却收到权限请求：不该发生。保守起见拒绝，
+          // 收到一个不属于任何在跑轮次的权限请求：不该发生。保守起见拒绝，
           // 而不是批准一个我们不知道归属的操作
           return { outcome: { outcome: 'cancelled' } }
         }
@@ -247,6 +288,9 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
     // 会话把手绑在这条连接上，连接没了它们也没意义
     for (const s of sessions.values()) s.dispose()
     sessions.clear()
+    // 审批落点同理：连接断了那些轮次都不可能再推进，留着只会让一个
+    // 迟到的权限请求匹配到一个已经死掉的会话
+    slots.clear()
     conn = null
     ctx = null
     child = null
@@ -281,7 +325,8 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
       const preamble = fresh ? historyPreamble(req.history) : null
       const prompt = preamble ? `${preamble}\n\n---\n\n${req.question}` : req.question
 
-      slot = { sessionId: req.sessionId }
+      // 按 ACP 那侧的 sessionId 登记，权限请求 handler 靠它找回归属
+      slots.set(session.sessionId, { sessionId: req.sessionId })
       let answer = ''
 
       // 取消：发 session/cancel 通知，然后等 agent 回 stopReason: 'cancelled'。
@@ -397,7 +442,10 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
         return { answer, evidence: [] }
       } finally {
         unsubscribe()
-        slot = null
+        // 只删自己那一格。原来是 `slot = null`（清掉唯一那个格子），
+        // 并发之后那等于把别的会话正在跑的那轮也一起抹掉 ——
+        // 它的权限请求随后会查不到归属、被保守拒绝。
+        slots.delete(session.sessionId)
       }
     },
 

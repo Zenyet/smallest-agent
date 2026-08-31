@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest'
-import { buildEnv } from '../../electron/main/config-env'
+import { buildEnv, SETTING_KEYS } from '../../electron/main/config-env'
+import { validateSettingsPatch } from '../../electron/main/settings-validate'
+import { GROUPS, ADVANCED_MODEL_KEYS } from '../../electron/renderer/src/settings-fields'
 import { loadConfig } from '../../src/config'
 
 const paths = { sessionsDir: '/data/sessions', cacheDir: '/data/cache' }
@@ -91,5 +93,34 @@ describe('buildEnv', () => {
     expect(() => buildEnv({}, { ACTIVE_VENDOR: 'anthropic' }, paths)).not.toThrow()
     const env = buildEnv({}, { ACTIVE_VENDOR: 'anthropic' }, paths)
     expect(() => loadConfig(env)).toThrow(/DEEPSEEK_API_KEY/)
+  })
+})
+
+// ## 这一条锁的是一类反复出现过的 bug
+//
+// 设置页渲染了某个字段，但它不在 SETTING_KEYS 里 —— 而 settings-validate
+// 按那份清单过滤，所以用户填完保存会被**静默丢掉**（存不下来，也没提示）。
+// BRAVE_API_KEY / TAVILY_API_KEY 就这么坏过一次。
+describe('设置页渲染的字段必须能存下来', () => {
+  it('GROUPS 里出现的每个键都在 SETTING_KEYS 里', () => {
+    const allowed = new Set<string>(SETTING_KEYS)
+    for (const [section, groups] of Object.entries(GROUPS)) {
+      for (const [, keys] of groups ?? []) {
+        for (const key of keys) {
+          expect(allowed.has(key), `${section} 页渲染了 ${key}，但它不在 SETTING_KEYS 里`).toBe(true)
+        }
+      }
+    }
+  })
+
+  it('高级参数那几个也在', () => {
+    const allowed = new Set<string>(SETTING_KEYS)
+    for (const key of ADVANCED_MODEL_KEYS) {
+      expect(allowed.has(key), `${key} 不在 SETTING_KEYS 里`).toBe(true)
+    }
+  })
+
+  it('SUBAGENT 能通过校验存下来', () => {
+    expect(validateSettingsPatch({ SUBAGENT: '0' }).valid.SUBAGENT).toBe('0')
   })
 })
