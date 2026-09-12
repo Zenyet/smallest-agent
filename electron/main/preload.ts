@@ -1,3 +1,4 @@
+import type { ProjectTask, ProjectTaskChanged } from '../shared/project-task'
 import { contextBridge, ipcRenderer, type IpcRendererEvent } from 'electron'
 import { CH } from '../shared/channels'
 import type { ContextTarget, MenuItemSpec } from './context-menu'
@@ -24,6 +25,8 @@ import type {
   AgentsView,
 } from '../shared/channels'
 import type { ContentPart } from '../../src/types'
+import type { Fact, FactScope } from '../../src/memory/facts'
+import type { ConnectionCheck, SettingsStatus } from '../shared/settings'
 
 // 事件订阅统一包成「注册回调 → 返回取消函数」，React 的 useEffect 直接 return 它就能清理。
 function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
@@ -34,14 +37,22 @@ function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
 
 const api = {
   ping: (): Promise<'pong'> => ipcRenderer.invoke(CH.ping),
+  startProjectTask: (projectId: string): Promise<ProjectTask> => ipcRenderer.invoke(CH.startProjectTask, projectId),
+  getProjectTask: (sessionId: string): Promise<ProjectTask | null> => ipcRenderer.invoke(CH.getProjectTask, sessionId),
+  acceptProjectTask: (sessionId: string): Promise<ProjectTask> => ipcRenderer.invoke(CH.acceptProjectTask, sessionId),
+  exportProjectTask: (sessionId: string): Promise<string | null> => ipcRenderer.invoke(CH.exportProjectTask, sessionId),
+  onProjectTaskChanged: (cb: (event: ProjectTaskChanged) => void) => subscribe(CH.projectTaskChanged, cb),
   sendMessage: (sessionId: string, message: string, attachments?: ContentPart[]): Promise<void> =>
     ipcRenderer.invoke(CH.sendMessage, sessionId, message, attachments),
   // 返回「有没有受理」，不代表已经停了 —— 真停下来时会收到 onCancelled。
   cancelMessage: (sessionId: string): Promise<boolean> =>
     ipcRenderer.invoke(CH.cancelMessage, sessionId),
   getSettings: (): Promise<DesktopSettings> => ipcRenderer.invoke(CH.getSettings),
-  saveSettings: (patch: DesktopSettings): Promise<DesktopSettings> =>
-    ipcRenderer.invoke(CH.saveSettings, patch),
+  getSettingsStatus: (): Promise<SettingsStatus> => ipcRenderer.invoke(CH.getSettingsStatus),
+  checkConnection: (vendorId: string): Promise<ConnectionCheck> => ipcRenderer.invoke(CH.checkConnection, vendorId),
+  selectNotesDirectory: (): Promise<string | null> => ipcRenderer.invoke(CH.selectNotesDirectory),
+  saveSettings: (patch: DesktopSettings, unset?: string[]): Promise<DesktopSettings> =>
+    ipcRenderer.invoke(CH.saveSettings, patch, unset),
   restartApp: (): Promise<void> => ipcRenderer.invoke(CH.restartApp),
   listSessions: (): Promise<SessionMeta[]> => ipcRenderer.invoke(CH.listSessions),
   // projectId：新会话落在哪个项目下。不传/传 null 就是「未分组」。
@@ -81,6 +92,17 @@ const api = {
   respondApproval: (requestId: string, decision: ApprovalDecision): Promise<void> =>
     ipcRenderer.invoke(CH.approvalResponse, requestId, decision),
 
+  // --- 跨会话事实记忆：读 + 删 + 改值 ---
+  // 没有「新增」：新增只该由模型在对话里调 remember 发起，见 channels.ts 那段。
+  // updateFact 只修 value，key/scope 不变（那两个决定这条是哪条）——纠错用。
+  getFacts: (): Promise<Fact[]> => ipcRenderer.invoke(CH.getFacts),
+  forgetFact: (key: string, scope: FactScope, expectedUpdatedAt?: number): Promise<Fact[]> =>
+    ipcRenderer.invoke(CH.forgetFact, key, scope, expectedUpdatedAt),
+  restoreFact: (key: string, scope: FactScope): Promise<Fact[]> => ipcRenderer.invoke(CH.restoreFact, key, scope),
+  updateFact: (key: string, scope: FactScope, value: string): Promise<Fact[]> =>
+    ipcRenderer.invoke(CH.updateFact, key, scope, value),
+  onFactsChanged: (cb: (facts: Fact[]) => void) => subscribe(CH.factsChanged, cb),
+
   // --- 自定义 agent ---
   getAgents: (sessionId: string): Promise<AgentsView> =>
     ipcRenderer.invoke(CH.getAgents, sessionId),
@@ -101,6 +123,9 @@ const api = {
     ipcRenderer.invoke(CH.setSessionModel, sessionId, modelId),
   setSessionPermission: (sessionId: string, mode: string): Promise<ProvidersView> =>
     ipcRenderer.invoke(CH.setSessionPermission, sessionId, mode),
+  /** 启用/停用一个外部 CLI（写顶层黑名单）。返回写完之后的完整视图。 */
+  toggleProvider: (sessionId: string, providerId: string, enabled: boolean): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.toggleProvider, sessionId, providerId, enabled),
 
   // Provider detection（两段式）
   detectProviders: (): Promise<ProviderDetection[]> => ipcRenderer.invoke(CH.detectProviders),

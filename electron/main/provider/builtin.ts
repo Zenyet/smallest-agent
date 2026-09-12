@@ -1,3 +1,4 @@
+import { ALL, CUSTOM_ID } from '../vendors'
 // ============================================================================
 // provider/builtin.ts —— 内置 agent：本仓库自己的 ReAct 循环
 // ----------------------------------------------------------------------------
@@ -74,11 +75,12 @@ export function createBuiltinProvider(deps: BuiltinDeps): Provider {
         : guardedRegistry
 
       // 流式回调绑定本次请求 —— 这就是 callModel 必须请求级重建的原因
+      let localCacheHit = false
       const callModel = deps.buildCallModel(
         req.config,
         registry,
         (text) => req.emit({ kind: 'delta', text }),
-        () => req.emit({ kind: 'cache-hit' }),
+        () => { localCacheHit = true; req.emit({ kind: 'cache-hit' }) },
       )
 
       // withCancel 套在**最外层**，即 buildCallModel 的返回值之外。
@@ -86,7 +88,19 @@ export function createBuiltinProvider(deps: BuiltinDeps): Provider {
       // 位置不是洁癖，套错了有实际后果（见 cancel.ts 的注释）：
       //   • 套在 withRetry 里面 → 取消被当成可重试失败，反复退避几轮才放弃
       //   • 套在 withFallback 里面 → 取消触发「换备用模型」，反而多打一次请求
-      const cancellableCallModel = withCancel(callModel, req.token)
+      const cancellableCallModel = withCancel(async (messages, signal) => {
+        localCacheHit = false
+        const result = await callModel(messages, signal)
+        // A disk hit reuses an old response; its historic usage is not billed again.
+        const usage = localCacheHit
+          ? { model: result.usage?.model ?? req.config.model, inputTokens: 0, outputTokens: 0, totalTokens: 0, cacheReadTokens: 0, reasoningTokens: 0, contextTokens: result.usage?.contextTokens ?? result.usage?.inputTokens, localCacheHit: true }
+          : result.usage ?? { model: req.config.model }
+        const endpoint = req.config.baseURL.replace(/\/+$/, '')
+        const vendorId = ALL.find(v => v.baseUrl.replace(/\/+$/, '') === endpoint)?.id ?? CUSTOM_ID
+        const sourced = { ...usage, vendorId }
+        req.emit({ kind: 'usage', usage: sourced })
+        return { ...result, usage: sourced }
+      }, req.token)
 
       const summarize = deps.makeSummarize(req.config)
       const evidence: string[] = []
@@ -102,6 +116,8 @@ export function createBuiltinProvider(deps: BuiltinDeps): Provider {
         tools: registry,
         config: req.config,
         history: req.history,
+        attachments: req.attachments,
+        token: req.token,
         compact: (messages: Message[]) =>
           compactMessages(messages, {
             maxTokens: req.config.maxContextTokens,

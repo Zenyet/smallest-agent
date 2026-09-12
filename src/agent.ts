@@ -11,7 +11,8 @@
 // 「为什么 / 不直观的点」，不会像这样逐处说明。
 // ============================================================================
 
-import type { Config, Message, ModelResult, ToolRegistry } from './types'
+import type { Config, ContentPart, Message, ModelResult, ToolRegistry } from './types'
+import { userMessage } from './attachments'
 import { runTool } from './tools/index'
 
 // 每一轮的快照，给外部观察用（cli 拿它打印 trace、eval 拿它收集证据）。
@@ -29,19 +30,39 @@ export interface AgentDeps {
   config: Pick<Config, 'systemPrompt' | 'maxTurns'> // 系统提示 + 防死循环上限
   onTurn?: (info: TurnInfo) => void // 每轮回调：打印 trace / 收集证据
   history?: Message[] // Stage 2：上次会话的历史（记忆）
+  attachments?: ContentPart[]
   compact?: (messages: Message[]) => Promise<Message[]> // Stage 2：开局压缩过长历史
   onComplete?: (messages: Message[]) => void | Promise<void> // Stage 2：跑完把完整消息存回去
+  /**
+   * 取消令牌。传了的话循环在每轮开始和每个工具之前查它，已取消就抛。
+   *
+   * ## 为什么必须在循环里查
+   *
+   * callModel 外面已经套了 withCancel（electron/main/cancel.ts），那能在
+   * 「准备调模型」时拦住。但它拦不住工具：工具执行不经过 callModel。
+   * 用户点停止时如果 agent 卡在一个慢工具上（web_search 拉不动、
+   * read_file 读大文件），那一轮要一直跑到工具返回、下一次 callModel
+   * 入口才看见取消标志 —— 而用户按停止正是因为等不及它跑完。
+   *
+   * ## 为什么是结构类型而不是 import CancelToken
+   *
+   * src/ 是核心，electron/ 是它的一层壳 —— 依赖方向只能是
+   * electron → src。为了一个取消检查把方向倒过来，会让 CLI（也用 runAgent）
+   * 莫名依赖上 Electron 那侧的模块。这里只需要「能问它取消了没」，
+   * 声明成结构类型就够，CancelToken 天然满足。
+   */
+  token?: { throwIfCancelled(): void }
 }
 
 export async function runAgent(userInput: string, deps: AgentDeps): Promise<string> {
-  const { callModel, tools, config, onTurn, history, compact, onComplete } = deps
+  const { callModel, tools, config, onTurn, history, compact, onComplete, token } = deps
 
   // 上下文 = 系统提示 +（可选）历史 + 本轮用户问题。
   // messages 这个数组就是 agent 的「工作台/短期记忆」，整个循环都在往里加东西。
   let messages: Message[] = [
     { role: 'system', content: config.systemPrompt },
     ...(history ?? []), // 没有历史就是空（Stage 0 行为）
-    { role: 'user', content: userInput },
+    userMessage(userInput, deps.attachments),
   ]
 
   if (compact) messages = await compact(messages) // Stage 2：太长就先摘要压缩，再进循环
@@ -49,6 +70,13 @@ export async function runAgent(userInput: string, deps: AgentDeps): Promise<stri
   // ===== ReAct 循环本体 =====
   // turn/maxTurns 只是「最多转几圈」的保险，防止模型无限调工具卡死。
   for (let turn = 1; turn <= config.maxTurns; turn++) {
+    // 每轮开头查一次取消 —— 在 callModel 之前。
+    //
+    // withCancel 已经套在 callModel 外面（builtin.ts），那里也会查。
+    // 但「准备进入下一轮」和「调模型」之间可能有几百毫秒（压缩、装配提示），
+    // 在这里多查一次能让停止更快响应。不传 token 的话这是空操作。
+    token?.throwIfCancelled()
+
     // 【Reasoning 想】问模型：看了目前的 messages，你下一步干嘛？
     const result = await callModel(messages)
 
@@ -56,7 +84,9 @@ export async function runAgent(userInput: string, deps: AgentDeps): Promise<stri
     messages.push({
       role: 'assistant',
       content: result.text,
+      ...(result.usage ? { usage: result.usage } : {}),
       toolCalls: result.toolCalls.length ? result.toolCalls : undefined,
+      timestamp: Date.now(),
     })
 
     // 服务端已经跑完的工具（DeepSeek / OpenAI 的 web_search）先垫进来。
@@ -85,6 +115,10 @@ export async function runAgent(userInput: string, deps: AgentDeps): Promise<stri
     // 消息喂回 messages。关键就在这——下一圈顶部的 callModel 会带着「工具结果」
     // 再问一次，模型于是能基于真实数据继续推理。这就是 messages「滚雪球」的地方。
     for (const call of result.toolCalls) {
+      // 工具之间也查一次：一轮里要调 5 个工具、第 1 个就卡住时，不查的话
+      // 要等它跑完才看见取消。现在每个工具开始前都查，最坏情况是「当前
+      // 这个工具跑完」（几秒），不是「这一轮所有工具跑完」（可能几十秒）。
+      token?.throwIfCancelled()
       const output = await runTool(tools, call.name, call.args)
       messages.push({ role: 'tool', content: output, toolCallId: call.id, name: call.name })
       toolResults.push({ name: call.name, args: call.args, output })

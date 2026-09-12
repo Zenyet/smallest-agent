@@ -319,6 +319,7 @@ function val(get: Lookup, key: string): string {
 }
 
 export interface ModelChoice {
+  contextWindow?: number
   id: string
   name: string
 }

@@ -1,14 +1,17 @@
+import { createProjectTaskStore, projectTaskMarkdown } from './project-task-store'
+import { validateAttachments } from '../../src/attachments'
 // 唯一允许 import electron 的两个文件之一（另一个是 index.ts）。
 // 这里只做「接线」：把纯模块拼起来挂到 ipcMain 上，不放业务逻辑 ——
 // 业务逻辑都在能被 vitest 直接测的纯模块里。
 import { dialog, ipcMain, type BrowserWindow } from 'electron'
-import { readFile } from 'node:fs/promises'
+import { readFile, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { CH, type ProvidersView } from '../shared/channels'
 import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
-import { validateSettingsPatch } from './settings-validate'
+import { validateSettingsUpdate } from './settings-update'
+import { checkConnection } from './connection-check'
 import { menuFor, type ContextTarget } from './context-menu'
 import { createAgentRunner, makeDefaultRunnerDeps, type AgentEmitter } from './agent-runner'
 import { truncateAtNthUser } from './truncate'
@@ -25,6 +28,7 @@ import {
   permissionFor,
   providerFor,
   providerOptions,
+  toggleProvider,
   toPermissionMode,
 } from './providers'
 import { createProviderRegistry } from './provider/registry'
@@ -38,8 +42,17 @@ import {
   upsertAgent,
   type AgentDef,
 } from './agents'
+import { getFacts, getFactsStrict, rememberFact, forgetFactByKey } from './facts-store'
 import { randomUUID } from 'node:crypto'
-import { forgetSessionTitle, getSessionTitles, setSessionTitle } from './session-titles-store'
+import { createFactEdits } from './fact-edits'
+import {
+  forgetSessionAutoTitle,
+  forgetSessionTitle,
+  getAutoTitles,
+  getSessionTitles,
+  lockSessionAutoTitle,
+  setSessionTitle,
+} from './session-titles-store'
 import {
   addProject,
   assignSession,
@@ -50,6 +63,7 @@ import {
   toggleCollapsed,
 } from './projects'
 import type { ApprovalGate } from './approval'
+import type { FactScope } from '../../src/memory/facts'
 import { loadConfig } from '../../src/config'
 import { createJsonSessionStore } from '../../src/memory/store'
 import type { AgentRuntime } from './agent-runtime'
@@ -82,15 +96,30 @@ export function setupIpcHandlers(
     if (!win.isDestroyed()) win.webContents.send(channel, payload)
   }
 
+  const tasks = createProjectTaskStore(join(paths.sessionsDir, '..', 'tasks.json'),
+    (event) => broadcast(CH.projectTaskChanged, event))
+  const activeTasks = new Set<string>()
   const emit: AgentEmitter = {
     chunk: send(CH.messageChunk),
-    toolCall: send(CH.toolCall),
-    complete: send(CH.messageComplete),
+    toolCall: (event) => {
+      if (activeTasks.has(event.sessionId)) tasks.tool(event)
+      send(CH.toolCall)(event)
+    },
+    complete: (event) => {
+      if (activeTasks.delete(event.sessionId)) tasks.finish(event.sessionId, event.text)
+      send(CH.messageComplete)(event)
+    },
     verdict: send(CH.verdict),
     cacheHit: send(CH.cacheHit),
-    error: send(CH.error),
+    error: (event) => {
+      if (activeTasks.delete(event.sessionId)) tasks.stop(event.sessionId, 'failed', event.message)
+      send(CH.error)(event)
+    },
     approvalRequest: send(CH.approvalRequest),
-    cancelled: send(CH.cancelled),
+    cancelled: (event) => {
+      if (activeTasks.delete(event.sessionId)) tasks.stop(event.sessionId, 'stopped', '任务已停止，已保留读取记录。')
+      send(CH.cancelled)(event)
+    },
   }
 
   const readConfig = () => loadConfig(buildEnv(process.env, getSettings(), paths))
@@ -118,6 +147,18 @@ export function setupIpcHandlers(
 
   const runner = createAgentRunner({
     ...makeDefaultRunnerDeps(runtime.registry, emit, readConfig, gate),
+    facts: {
+      getAll: () => getFacts(),
+      // 两个写操作都广播：模型在对话里改了记忆，而设置页可能正开着 ——
+      // 不广播的话那边看到的是一份不动的旧列表，用户以为没记上。
+      // 走 broadcast 而不是 send：设置页将来可能又变回独立窗口。
+      remember: (input) => {
+        broadcast(CH.factsChanged, rememberFact(input))
+      },
+      forget: (key, scope) => {
+        broadcast(CH.factsChanged, forgetFactByKey(key, scope))
+      },
+    },
     // 这一轮由谁跑。内置返回 null，让 runner 自己装配（它无状态，每轮新建）。
     resolveProvider: (sessionId) => {
       const state = getProvidersState()
@@ -159,21 +200,64 @@ export function setupIpcHandlers(
     return accepted
   })
 
-  ipcMain.handle(CH.sendMessage, (_e, sessionId: string, message: string, attachments?: any[]) => {
+  ipcMain.handle(CH.sendMessage, (_e, sessionId: string, message: string, attachments?: unknown) => {
     // 重启过程中拒绝新工作：防止 restartApp 的守卫检查通过后、app.quit() 的
     // before-quit 事件循环间隙里到达的 sendMessage 启动新 turn——那会孤儿化该 turn。
     if (isRestarting()) {
       throw new Error('应用正在重启，无法处理新消息')
     }
-    return runner.run(sessionId, message, attachments)
+    return runner.run(sessionId, message, validateAttachments(attachments))
+  })
+  ipcMain.handle(CH.getProjectTask, (_e, sessionId: string) => tasks.get(sessionId))
+  ipcMain.handle(CH.acceptProjectTask, (_e, sessionId: string) => tasks.accept(sessionId))
+  ipcMain.handle(CH.exportProjectTask, async (_e, sessionId: string) => {
+    const task = tasks.get(sessionId)
+    if (!task) throw new Error('找不到这个任务')
+    const markdown = projectTaskMarkdown(task)
+    const result = await dialog.showSaveDialog(win, {
+      title: '导出项目说明', defaultPath: `${task.projectName}-项目说明.md`,
+      filters: [{ name: 'Markdown', extensions: ['md'] }],
+    })
+    if (result.canceled || !result.filePath) return null
+    await writeFile(result.filePath, markdown, 'utf8')
+    return result.filePath
+  })
+  ipcMain.handle(CH.startProjectTask, async (_e, projectId: string) => {
+    if (isRestarting()) throw new Error('应用正在重启')
+    const project = getProjectsState().projects.find((p) => p.id === projectId)
+    if (!project) throw new Error('请先选择一个本地项目')
+    const config = loadConfig(buildEnv(process.env, getSettings(), paths), { allowMissingApiKey: true })
+    if (!config.apiKey) throw new Error('请先在凭据设置中配置当前模型的 API Key')
+    const id = newSessionId(Date.now())
+    const task = tasks.create(id, project)
+    try {
+      await createJsonSessionStore(paths.sessionsDir).save(id, [])
+      commitProjects(assignSession(getProjectsState(), id, projectId))
+      setProvidersState(assignPermission(assignProvider(getProvidersState(), id, BUILTIN_ID), id, 'readonly'))
+      lockSessionAutoTitle(id, `理解项目 · ${project.name}`)
+      activeTasks.add(id)
+      void runner.run(id, task.prompt, undefined, { projectOverview: true }).catch((err: unknown) => {
+        activeTasks.delete(id)
+        tasks.stop(id, 'failed', err instanceof Error ? err.message : String(err))
+      })
+      return task
+    } catch (err) {
+      tasks.stop(id, 'failed', err instanceof Error ? err.message : String(err))
+      throw err
+    }
   })
   ipcMain.handle(CH.getSettings, () => getSettings())
-  ipcMain.handle(CH.saveSettings, (_e, raw: unknown) => {
-    const { valid, dropped } = validateSettingsPatch(raw)
+  ipcMain.handle(CH.checkConnection, (_e, vendorId: string) => checkConnection(vendorId, getSettings()))
+  ipcMain.handle(CH.selectNotesDirectory, async () => {
+    const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: '选择笔记目录' })
+    return result.canceled ? null : result.filePaths[0] ?? null
+  })
+  ipcMain.handle(CH.saveSettings, (_e, raw: unknown, rawUnset: unknown) => {
+    const { valid, dropped, unset } = validateSettingsUpdate(raw, rawUnset)
     if (dropped.length > 0) {
       console.warn(`[settings] 跳过了未知的配置项: ${dropped.join(', ')}`)
     }
-    const next = saveSettings(valid)
+    const next = saveSettings(valid, unset)
     // 广播给所有窗口，不只回给发起这次 invoke 的那个。设置搬进独立窗口之后，
     // 写设置的（设置窗口）和用设置的（主窗口）不再是同一个 renderer ——
     // 「谁写的谁知道」不够了。⚠️ next 里含明文 API Key，永远不要 log 它。
@@ -190,7 +274,22 @@ export function setupIpcHandlers(
   ipcMain.handle(CH.listSessions, async () => {
     const metas = decorateSessions(await listSessions(paths.sessionsDir), getProjectsState())
     const titles = getSessionTitles()
-    return metas.map((m) => (titles[m.id] ? { ...m, title: titles[m.id] } : m))
+    const auto = getAutoTitles()
+    // 三级优先：用户手改的 > 第一次落盘时锁定的 > listSessions 现推的兜底。
+    //
+    // 中间那一级是新加的，为了让名字**定下来不再变**：现推的那个读当前文件，
+    // 而文件内容会变（上下文压缩把摘要插到最前面、编辑重发砍掉前几轮），
+    // 于是用户什么都没做、侧边栏的名字自己改了。见 session-titles.ts
+    // 的 AutoTitles。
+    //
+    // 顺带给**旧会话**补锁：它们创建时还没有这套机制，第一次被列出来时
+    // 用当下推出来的值锁住，从此不再漂。
+    return metas.map((m) => {
+      if (titles[m.id]) return { ...m, title: titles[m.id] }
+      if (auto[m.id]) return { ...m, title: auto[m.id] }
+      lockSessionAutoTitle(m.id, m.title)
+      return m
+    })
   })
 
   ipcMain.handle(CH.getSessionTitles, () => getSessionTitles())
@@ -317,6 +416,8 @@ export function setupIpcHandlers(
     // forgetSessionTitle —— 不清的话会越攒越多，而且 id 万一重合会让新会话
     // 莫名带上一个旧名字。
     forgetSessionTitle(id)
+    // 锁定的自动标题同理 —— 同一个理由（见 session-titles.ts 的 forgetAutoTitle）
+    forgetSessionAutoTitle(id)
     // provider / 模型 / 权限绑定同理 —— 会话没了它们就是垃圾数据。
     // 引用比较跳过「本来就没绑过」的常见情况，不必每次删会话都写一次盘
     const beforeProviders = getProvidersState()
@@ -326,7 +427,8 @@ export function setupIpcHandlers(
     const beforeAgents = getAgentsState()
     const afterAgents = forgetAgentSession(beforeAgents, id)
     if (afterAgents !== beforeAgents) setAgentsState(afterAgents)
-    return deleteSession(paths.sessionsDir, id)
+    await deleteSession(paths.sessionsDir, id)
+    tasks.remove(id)
   })
 
   ipcMain.handle(CH.loadSession, (_e, id: string) => createJsonSessionStore(paths.sessionsDir).load(id))
@@ -356,11 +458,18 @@ export function setupIpcHandlers(
     return {
       options: providerOptions(state),
       current,
-      models: (entry?.models ?? []).map((m) => ({ id: m.id, name: m.name })),
+      models: (entry?.models ?? []).map((m) => ({ id: m.id, name: m.name, ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}) })),
       currentModel: modelFor(state, sessionId),
       permission: permissionFor(state, sessionId),
       configPath: providersStorePath(),
       projectPath: cwdFor(sessionId),
+      // 全集（含停用的）。options 是「能选什么」，这份是「有哪些、启没启用」——
+      // 设置页要能列出停用的，否则关掉之后界面上找不到它、只能手改 JSON
+      allProviders: state.external.map((e) => ({
+        id: e.id,
+        name: e.name,
+        enabled: !state.disabledProviders.includes(e.id),
+      })),
     }
   }
 
@@ -393,6 +502,17 @@ export function setupIpcHandlers(
     return view
   }
 
+  // --- 跨会话事实记忆 ---
+  //
+  // 只有读和删，以及改值。写由模型在对话里调 remember 发起 —— 见 channels.ts 那段注释。
+  const factEdits = createFactEdits({ read: getFactsStrict, forget: forgetFactByKey, remember: rememberFact })
+  ipcMain.handle(CH.getFacts, () => getFactsStrict())
+  const publishFacts = (facts: ReturnType<typeof getFacts>) => { broadcast(CH.factsChanged, facts); return facts }
+  ipcMain.handle(CH.forgetFact, (_e, key: string, scope: FactScope, expectedUpdatedAt?: number) =>
+    publishFacts(factEdits.forget(key, scope, expectedUpdatedAt)))
+  ipcMain.handle(CH.restoreFact, (_e, key: string, scope: FactScope) => publishFacts(factEdits.restore(key, scope)))
+  ipcMain.handle(CH.updateFact, (_e, key: string, scope: FactScope, value: string) => publishFacts(factEdits.update(key, scope, value)))
+
   ipcMain.handle(CH.getAgents, (_e, sessionId: string) => agentsView(sessionId))
 
   // 新建和改都走这一个：renderer 传完整的 AgentDef，没有 id 就是新建。
@@ -415,6 +535,14 @@ export function setupIpcHandlers(
   )
 
   ipcMain.handle(CH.getProviders, (_e, sessionId: string) => providersView(sessionId))
+
+  // 启用/停用一个外部 CLI。返回的视图里 options 会立刻反映变化 ——
+  // 停用当前正在用的那家时，providerFor 会回落到内置（见 normalize 里
+  // 「清掉指向已删 provider 的绑定」那条，黑名单不影响已有绑定，
+  // 但选择器里选不到它了，用户下次切换只能选别的）。
+  ipcMain.handle(CH.toggleProvider, (_e, sessionId: string, providerId: string, enabled: boolean) =>
+    commitProviders(toggleProvider(getProvidersState(), providerId, enabled), sessionId),
+  )
 
   ipcMain.handle(CH.setSessionProvider, (_e, sessionId: string, providerId: string) =>
     commitProviders(assignProvider(getProvidersState(), sessionId, providerId), sessionId),
@@ -510,4 +638,3 @@ export function setupProviderHandlers(): void {
     return null
   })
 }
-

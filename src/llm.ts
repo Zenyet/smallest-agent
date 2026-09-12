@@ -1,3 +1,5 @@
+import { modelUsage } from './usage'
+import { attachmentData, isTextAttachment, textAttachment } from './attachments'
 // ============================================================================
 // llm.ts —— 唯一直接接触 LLM SDK 的文件（「边界层」）
 // ----------------------------------------------------------------------------
@@ -34,36 +36,28 @@ import type {
 //   - assistant 消息如果带工具调用，content 必须是混合数组（文本 + tool-call 条目）
 //     而不是普通字符串；纯文本 assistant 才能用字符串 content
 //   - user 消息如果带多模态内容（图片/文件），content 必须是数组
-function toSdkMessages(messages: Message[]): ModelMessage[] {
+export function toSdkMessages(messages: Message[]): ModelMessage[] {
   return messages.map((m): ModelMessage => {
     if (m.role === 'system') return { role: 'system', content: m.content }
 
     // user 消息：检查是否有多模态内容
     if (m.role === 'user') {
       if (m.contentParts && m.contentParts.length > 0) {
-        // 多模态消息：转换为 SDK 的 content 数组格式
-        const contentArray: any[] = []
-
+        // SDK 使用 image / file 内容块，不能直接传 OpenAI 的 wire 格式。
+        const contentArray: Exclude<Extract<ModelMessage, { role: 'user' }>['content'], string> = []
+        if (!m.contentParts.some((part) => part.type === 'text') && m.content) {
+          contentArray.push({ type: 'text', text: m.content })
+        }
         for (const part of m.contentParts) {
           if (part.type === 'text') {
             contentArray.push({ type: 'text', text: part.text })
+          } else if (part.type === 'file' && isTextAttachment(part)) {
+            contentArray.push({ type: 'text', text: textAttachment(part) })
           } else if (part.type === 'image') {
-            contentArray.push({
-              type: 'image_url',
-              image_url: {
-                url: part.data,
-                detail: part.detail || 'auto',
-              },
-            })
+            const data = attachmentData(part)
+            contentArray.push({ type: 'image', image: data.bytes, mediaType: data.mimeType })
           } else if (part.type === 'file') {
-            contentArray.push({
-              type: 'file',
-              file: {
-                data: part.data.replace(/^data:[^;]+;base64,/, ''), // 去掉 data URI 前缀
-                media_type: part.mimeType,
-                filename: part.filename,
-              },
-            })
+            contentArray.push({ type: 'file', data: attachmentData(part).bytes, mediaType: part.mimeType, filename: part.filename })
           }
         }
 
@@ -177,7 +171,7 @@ function makeResponsesCallModel(
         output: tr.result ?? tr.output,
       }))
 
-  return async (messages: Message[]): Promise<ModelResult> => {
+  return async (messages: Message[], signal?: AbortSignal): Promise<ModelResult> => {
     const sdkMessages = toSdkMessages(messages)
     if (onText) {
       const result = streamText({
@@ -185,10 +179,13 @@ function makeResponsesCallModel(
         temperature: config.temperature,
         messages: sdkMessages,
         tools: sdkTools as never,
+        // 见下面非流式那处的注释 —— 两条路都要给，漏一条就有一半请求停不掉
+        abortSignal: signal,
       })
       for await (const delta of result.textStream) onText(delta)
       const server = mapServerCalls(await result.toolResults)
       return {
+        usage: modelUsage(await result.totalUsage, config.model),
         text: await result.text,
         toolCalls: mapToolCalls(await result.toolCalls),
         ...(server.length > 0 ? { serverToolCalls: server } : {}),
@@ -199,9 +196,14 @@ function makeResponsesCallModel(
       temperature: config.temperature,
       messages: sdkMessages,
       tools: sdkTools as never,
+      // SDK 把它一路传到 fetch。这是唯一能真正中断进行中请求的机制 ——
+      // 不给的话用户点停止只能等这次请求自己跑完（见 types.ts 的
+      // CallModel 注释）
+      abortSignal: signal,
     })
     const server = mapServerCalls(result.toolResults)
     return {
+      usage: modelUsage(result.totalUsage, config.model),
       text: result.text ?? '',
       toolCalls: mapToolCalls(result.toolCalls),
       ...(server.length > 0 ? { serverToolCalls: server } : {}),
@@ -299,9 +301,18 @@ export function makeCallModel(
   }
 
   const provider = createOpenAICompatible({
+    // Request the final usage chunk; compatible APIs otherwise omit stream usage.
+    includeUsage: true,
     name: 'deepseek',
     baseURL: config.baseURL,
     apiKey: config.apiKey,
+    // 测试注入口。生产路径上是 undefined —— SDK 用全局 fetch。
+    //
+    // 为什么需要它：「取消能不能真的中断进行中的请求」这件事，只有在
+    // **拿到 SDK 交给 fetch 的那个 init.signal** 时才能验证。没有这个口子
+    // 就只能逐层单测「我把 signal 传给了下一层」，而那恰恰是我连着三轮
+    // 漏掉真问题的原因 —— 每层都对，链子还是断的。
+    fetch: config.fetch,
     // 厂商自带的联网搜索：把开关塞进请求体。
     //
     // ## 为什么走 transformRequestBody 而不是别的口子
@@ -358,7 +369,7 @@ export function makeCallModel(
       args: (tc.input ?? {}) as Record<string, unknown>,
     }))
 
-  return async (messages: Message[]): Promise<ModelResult> => {
+  return async (messages: Message[], signal?: AbortSignal): Promise<ModelResult> => {
     const sdkMessages = toSdkMessages(messages)
     if (onText) {
       // 流式路径（Stage 4b）：streamText 返回异步迭代器，
@@ -366,14 +377,20 @@ export function makeCallModel(
       // 再 await result.text / result.toolCalls 拿最终完整值。
       // 注：流式时模型「思考」和「工具调用声明」不会通过 textStream 流出，
       // 所以工具调用不会重复——textStream 只吐纯文本 token。
+      //
+      // abortSignal 交给 SDK：它一路传到 fetch。用户点停止时这次请求会
+      // 立刻被中断，而不是跑到底 —— 流式回答的绝大部分时间都在这个
+      // for await 里，不给 signal 的话「停止」在这儿完全没有着力点。
       const result = streamText({
         model,
         temperature: config.temperature,
         messages: sdkMessages,
         tools: sdkTools,
+        abortSignal: signal,
       })
       for await (const delta of result.textStream) onText(delta)
-      return { text: await result.text, toolCalls: mapToolCalls(await result.toolCalls) }
+      return { usage: modelUsage(await result.totalUsage, config.model),
+        text: await result.text, toolCalls: mapToolCalls(await result.toolCalls) }
     }
     // 非流式路径（Stage 0 默认）：generateText 一次性返回完整结果
     const result = await generateText({
@@ -381,9 +398,11 @@ export function makeCallModel(
       temperature: config.temperature,
       messages: sdkMessages,
       tools: sdkTools,
+      abortSignal: signal,
     })
     // result.text 在纯工具调用轮次可能是 undefined（模型只输出工具调用，没有文字），
     // 用 ?? '' 保证 ModelResult.text 永远是字符串，agent.ts 无需空判断。
-    return { text: result.text ?? '', toolCalls: mapToolCalls(result.toolCalls) }
+    return { usage: modelUsage(result.totalUsage, config.model),
+      text: result.text ?? '', toolCalls: mapToolCalls(result.toolCalls) }
   }
 }

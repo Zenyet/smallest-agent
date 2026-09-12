@@ -8,6 +8,11 @@ export type { DesktopSettings }
 export const CH = {
   // Renderer → Main（invoke，有返回值）
   ping: 'agent:ping',
+  startProjectTask: 'agent:start-project-task',
+  getProjectTask: 'agent:get-project-task',
+  acceptProjectTask: 'agent:accept-project-task',
+  exportProjectTask: 'agent:export-project-task',
+  projectTaskChanged: 'agent:project-task-changed',
   listSessions: 'agent:list-sessions',
   createSession: 'agent:create-session',
   deleteSession: 'agent:delete-session',
@@ -21,6 +26,9 @@ export const CH = {
   // 用户可能在 cancelled 事件到达前又点了一次。
   cancelMessage: 'agent:cancel-message',
   getSettings: 'agent:get-settings',
+  getSettingsStatus: 'agent:get-settings-status',
+  checkConnection: 'agent:check-connection',
+  selectNotesDirectory: 'agent:select-notes-directory',
   saveSettings: 'agent:save-settings',
   restartApp: 'agent:restart-app',
   // 打开设置：Main → Renderer 的事件（不是 invoke）。
@@ -54,6 +62,17 @@ export const CH = {
   // 为什么磁盘也要砍、不只改界面：不砍的话重开 app 那几条会回来，
   // 而且下一轮对话仍然带着它们（core 每轮从磁盘读历史）。
   truncateSession: 'agent:truncate-session',
+  // --- 跨会话事实记忆 ---
+  //
+  // 写入只该由模型在对话里调 remember 发起，但「改错了的值」需要在设置里
+  // 能修正——用户看见「用户在北京」而他在深圳，不该只能删掉再等模型重记。
+  // updateFact 只修 value，key/scope 不变（那两个决定这条是哪条）。
+  getFacts: 'agent:get-facts',
+  forgetFact: 'agent:forget-fact',
+  restoreFact: 'agent:restore-fact',
+  updateFact: 'agent:update-fact',
+  factsChanged: 'agent:facts-changed',
+
   // --- 自定义 agent（一套预设：系统提示 + 工具白名单）---
   // 和「Agent 模式」是两件事：那个选「谁来跑」，这个选「用什么设定跑」。
   getAgents: 'agent:get-agents',
@@ -69,6 +88,8 @@ export const CH = {
   setSessionProvider: 'agent:set-session-provider',
   setSessionModel: 'agent:set-session-model',
   setSessionPermission: 'agent:set-session-permission',
+  /** 启用/停用一个外部 CLI（写顶层黑名单 disabledProviders） */
+  toggleProvider: 'agent:toggle-provider',
   providersChanged: 'agent:providers-changed',
 
   // Provider detection（两段式）
@@ -102,6 +123,7 @@ export const CH = {
 } as const
 
 export interface MessageChunkEvent {
+  usage?: import('../../src/types').TokenUsage
   sessionId: string
   text: string // 增量 delta，不是全量
 }
@@ -159,9 +181,17 @@ export interface ErrorEvent {
   message: string
 }
 
+export interface RuntimeCapability {
+  id: 'notes' | 'skills'
+  label: string
+  state: 'idle' | 'loading' | 'ready' | 'failed'
+  detail: string
+}
+
 export interface RuntimeStatusEvent {
   phase: 'embedding' | 'indexing' | 'mcp' | 'ready' | 'failed'
   detail: string
+  capabilities?: RuntimeCapability[]
 }
 
 export interface SessionMeta {
@@ -190,6 +220,15 @@ export type ApprovalDecision = 'allow' | 'deny'
 // pendingApprovals 复用 ApprovalRequestEvent 的形状（字段完全一致：requestId/
 // sessionId/toolName/args），approval.ts 的 PendingApproval 结构上与它相同，
 // 不需要为了这一次 IPC 往返再定义一个几乎一样的类型。
+/**
+ * 一条跨会话事实，给设置面板显示。
+ *
+ * 和 src/memory/facts.ts 的 Fact 同形 —— 不在这里重新定义一份，直接 re-export，
+ * 免得两处慢慢分叉（会话标题那边踩过：SessionMeta 和 SessionTitles 各有一份
+ * 「标题」的概念，改一处忘一处）。
+ */
+export type { Fact, FactScope } from '../../src/memory/facts'
+
 export interface RunnerSnapshot {
   /** 正在跑的会话 ID（可能多个，按开始顺序）。 */
   runningSessionIds: string[]
@@ -232,7 +271,7 @@ export interface ProvidersView {
   /** 当前会话绑的 provider id */
   current: string
   /** 当前 provider 声明的模型清单。内置和没声明的给空数组 */
-  models: { id: string; name: string }[]
+  models: { id: string; name: string; contextWindow?: number }[]
   /** 当前选中的模型 id。没有可选模型时是 undefined */
   currentModel?: string
   /** 当前会话的权限模式（只对内置 agent 有意义） */
@@ -241,6 +280,16 @@ export interface ProvidersView {
   configPath: string
   /** 当前会话所属的项目路径。未分组会话给 undefined（此时文件工具不可用） */
   projectPath?: string
+  /**
+   * 配好的外部 CLI 全集，**含被停用的**。只给设置页用。
+   *
+   * options 是「选择器里能选什么」（已滤掉停用的），这份是「有哪些、各自
+   * 启没启用」—— 设置页要能把停用的也列出来，否则关掉之后界面上就再也
+   * 找不到它、只能手改 JSON 才能恢复。
+   */
+  // 可选：只有设置页需要它，别处（composer 的选择器）用不到。
+  // 设成必填会让所有构造 view 的测试都得补一个空数组，而它们测的是别的东西。
+  allProviders?: { id: string; name: string; enabled: boolean }[]
 }
 
 // Provider detection 类型

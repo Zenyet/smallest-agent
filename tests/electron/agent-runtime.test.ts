@@ -1,85 +1,100 @@
-import { describe, it, expect } from 'vitest'
-import { createRuntime } from '../../electron/main/agent-runtime'
+import { describe, it, expect, vi } from 'vitest'
+import { createRuntime, type RuntimeDeps } from '../../electron/main/agent-runtime'
 import { loadConfig } from '../../src/config'
 import type { RuntimeStatusEvent } from '../../electron/shared/channels'
 import type { Tool, ToolRegistry } from '../../src/types'
 
 const config = loadConfig({ DEEPSEEK_API_KEY: 'k', NOTES_DIR: '/notes' })
-const specs = {
-  own: { command: 'own', args: [] },
-  fs: { command: 'fs', args: [] },
-}
-
-const fakeTool = (name: string): Tool => ({
-  name,
-  description: name,
-  parameters: {},
-  run: async () => name,
+const specs = { own: { command: 'own', args: [] } }
+const fakeTool = (name: string): Tool => ({ name, description: name, parameters: {}, run: async () => name })
+const makeDeps = (overrides: Partial<RuntimeDeps> = {}): RuntimeDeps => ({
+  makeEmbedder: async () => async (texts) => texts.map(() => [1, 0]),
+  buildNotesIndex: async () => ({ size: 3, search: () => [] }) as never,
+  makeSearchNotesTool: () => fakeTool('search_notes'),
+  loadMcpToolsFromServers: async () => ({ tools: { get_weather: fakeTool('get_weather') }, close: async () => {} }),
+  makeWebSearchTool: () => fakeTool('web_search'), makeFetchUrlTool: () => fakeTool('fetch_url'),
+  ...overrides,
 })
-
-// 默认的假依赖：不碰网络、不起子进程
-function makeDeps(overrides: Record<string, unknown> = {}) {
-  return {
-    makeEmbedder: async () => async (texts: string[]) => texts.map(() => [1, 0]),
-    buildNotesIndex: async () => ({ size: 3, search: () => [] }) as never,
-    makeSearchNotesTool: () => fakeTool('search_notes'),
-    loadMcpToolsFromServers: async (servers: { command: string }[]) => {
-      const name = servers[0].command === 'own' ? 'get_weather' : 'read_file'
-      return { tools: { [name]: fakeTool(name) } as ToolRegistry, close: async () => {} }
-    },
-    ...overrides,
-  }
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((r) => { resolve = r })
+  return { promise, resolve }
 }
 
-describe('createRuntime', () => {
-  it('按 embedding → indexing → mcp → ready 的顺序播报进度', async () => {
-    const phases: RuntimeStatusEvent['phase'][] = []
-    await createRuntime(config, specs, (e) => phases.push(e.phase), makeDeps())
-    expect(phases).toEqual(['embedding', 'indexing', 'mcp', 'ready'])
-  })
-
-  it('注册表 = 自建 server 的工具 + 笔记检索 + 联网那两个', async () => {
-    const rt = await createRuntime(config, specs, () => {}, makeDeps())
-    // fs server 不在这里（按项目目录懒建，见 fs-tools.ts）。
-    // web_search / fetch_url 在这里：它们是全局能力，没有跟着项目走的边界。
-    expect(Object.keys(rt.registry).sort()).toEqual([
-      'fetch_url',
-      'get_weather',
-      'search_notes',
-      'web_search',
-    ])
-  })
-
-  // fs server 连不上的降级测试**移到 fs-tools.test.ts** 了 ——
-  // createRuntime 不再碰 fs server（按项目目录建，见 fs-tools.ts）
-
-  it('自建 server 连不上是致命错误：抛出并播报 failed', async () => {
-    const phases: RuntimeStatusEvent['phase'][] = []
-    const deps = makeDeps({
-      loadMcpToolsFromServers: async (servers: { command: string }[]) => {
-        if (servers[0].command === 'own') throw new Error('boom')
-        return { tools: {}, close: async () => {} }
-      },
-    })
-    await expect(
-      createRuntime(config, specs, (e) => phases.push(e.phase), deps),
-    ).rejects.toThrow('boom')
-    expect(phases.at(-1)).toBe('failed')
-  })
-
-  it('close 会关掉所有已建立的 MCP 连接', async () => {
-    const closed: string[] = []
-    const deps = makeDeps({
-      loadMcpToolsFromServers: async (servers: { command: string }[]) => ({
-        tools: {},
-        close: async () => {
-          closed.push(servers[0].command)
-        },
-      }),
-    })
-    const rt = await createRuntime(config, specs, () => {}, deps)
+describe('独立能力的运行时', () => {
+  it('MCP 未连接、检索未下载时，基础工具已经可用', async () => {
+    const mcp = deferred<{ tools: ToolRegistry; close: () => Promise<void> }>()
+    const embed = vi.fn(makeDeps().makeEmbedder)
+    const statuses: RuntimeStatusEvent[] = []
+    const rt = await createRuntime(config, specs, (s) => statuses.push(s), makeDeps({
+      makeEmbedder: embed, loadMcpToolsFromServers: () => mcp.promise,
+    }))
+    expect(statuses[0].phase).toBe('ready')
+    expect(embed).not.toHaveBeenCalled()
+    await expect(rt.registry.web_search.run({ query: 'q' })).resolves.toBe('web_search')
+    const close = vi.fn(async () => {})
+    mcp.resolve({ tools: { get_weather: fakeTool('get_weather') }, close })
+    await vi.waitFor(() => expect(rt.registry.get_weather).toBeDefined())
     await rt.close()
-    // fs server 不再自动加入（只在有 cwd 时才加），所以只有用户配的 own
-    expect(closed).toEqual(['own'])
+    expect(close).toHaveBeenCalledOnce()
+  })
+
+  it('首次检索才加载，多个会话共享同一次初始化', async () => {
+    const ready = deferred<Awaited<ReturnType<RuntimeDeps['makeEmbedder']>>>()
+    const embed = vi.fn(() => ready.promise)
+    const index = vi.fn(makeDeps().buildNotesIndex)
+    const rt = await createRuntime(config, specs, () => {}, makeDeps({ makeEmbedder: embed, buildNotesIndex: index }))
+    const first = rt.registry.search_notes.run({ query: 'one' })
+    const second = rt.registry.search_notes.run({ query: 'two' })
+    expect(embed).toHaveBeenCalledOnce()
+    expect(index).not.toHaveBeenCalled()
+    ready.resolve(async (texts) => texts.map(() => [1, 0]))
+    await Promise.all([first, second])
+    expect(index).toHaveBeenCalledOnce()
+    await rt.registry.search_notes.run({ query: 'three' })
+    expect(embed).toHaveBeenCalledOnce()
+    await rt.close()
+  })
+
+  it('检索失败不影响聊天状态或其他工具，后续调用可重试', async () => {
+    const embed = vi.fn(makeDeps().makeEmbedder).mockRejectedValueOnce(new Error('download unavailable'))
+    const states: RuntimeStatusEvent[] = []
+    const rt = await createRuntime(config, specs, (s) => states.push(s), makeDeps({ makeEmbedder: embed }))
+    await expect(rt.registry.search_notes.run({ query: 'q' })).rejects.toThrow(/笔记检索暂不可用/)
+    expect(states.at(-1)?.phase).toBe('ready')
+    expect(states.at(-1)?.capabilities?.find((c) => c.id === 'notes')?.state).toBe('failed')
+    await expect(rt.registry.fetch_url.run({ url: 'x' })).resolves.toBe('fetch_url')
+    await expect(rt.registry.search_notes.run({ query: 'q' })).resolves.toBe('search_notes')
+    expect(embed).toHaveBeenCalledTimes(2)
+    await rt.close()
+  })
+
+  it('扩展连接失败只改变对应能力的状态', async () => {
+    const states: RuntimeStatusEvent[] = []
+    const rt = await createRuntime(config, specs, (s) => states.push(s), makeDeps({
+      loadMcpToolsFromServers: async () => { throw new Error('unavailable') },
+    }))
+    await vi.waitFor(() => expect(states.at(-1)?.capabilities?.find((c) => c.id === 'skills')?.state).toBe('failed'))
+    expect(states.every((s) => s.phase === 'ready')).toBe(true)
+    await expect(rt.registry.search_notes.run({ query: 'q' })).resolves.toBe('search_notes')
+    await rt.close()
+  })
+
+  it('退出后才完成的 MCP 连接也被关闭，不重新发布就绪状态', async () => {
+    const mcp = deferred<{ tools: ToolRegistry; close: () => Promise<void> }>()
+    const status = vi.fn()
+    const close = vi.fn(async () => {})
+    const rt = await createRuntime(config, specs, status, makeDeps({ loadMcpToolsFromServers: () => mcp.promise }))
+    await rt.close()
+    const count = status.mock.calls.length
+    mcp.resolve({ tools: {}, close })
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce())
+    expect(status).toHaveBeenCalledTimes(count)
+    await expect(rt.registry.search_notes.run({ query: 'q' })).rejects.toThrow(/退出/)
+  })
+
+  it('桌面启动允许未配置密钥，模型请求仍要求有效配置', () => {
+    expect(loadConfig({}, { allowMissingApiKey: true }).apiKey).toBe('')
+    expect(() => loadConfig({})).toThrow(/API_KEY/)
   })
 })

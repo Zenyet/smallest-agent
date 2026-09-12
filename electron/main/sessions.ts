@@ -13,8 +13,31 @@ function safeId(id: string): string {
   return id.replace(/[^a-zA-Z0-9_-]/g, '_')
 }
 
+/**
+ * 上下文压缩塞进历史最前面的那条摘要（src/memory/compact.ts:59）。
+ *
+ * 它的 role 是 'user' —— 那样才能通过持久化时的 `filter(role!=='system')`。
+ * 但它不是用户说的话，拿它当标题会让侧边栏变成「【之前对话摘要】## 对话
+ * 摘要 - **任务背景**…」（实测发生过，见那个文件里的真实会话）。
+ */
+const SUMMARY_PREFIX = '【之前对话摘要】'
+
+/**
+ * 从历史推一个标题。
+ *
+ * ⚠️ 这是**兜底**路径。标题的正经来源是 session-titles-store 里锁定的那份
+ * （第一次落盘时定下，之后不再变）—— 见 ipc-handlers 的 listSessions。
+ * 这里只服务两种情况：那份还没写上（旧会话），或者被清掉了。
+ *
+ * 为什么不能只靠这里推：它读的是**当前**文件，而文件内容会变 ——
+ * 上下文压缩会把摘要插到最前面，编辑重发会砍掉前面几轮。两种情况下
+ * 「第一条 user」都不再是用户最初问的那句，于是侧边栏的名字自己会改。
+ */
 export function sessionTitle(messages: Message[]): string {
-  const first = messages.find((m) => m.role === 'user')
+  // 跳过压缩摘要：它是机器写的，不是用户问的
+  const first = messages.find(
+    (m) => m.role === 'user' && !m.content.startsWith(SUMMARY_PREFIX),
+  )
   if (!first) return '新会话'
   // 折叠所有空白（含换行），否则多行输入会把侧边栏撑变形
   const flat = first.content.replace(/\s+/g, ' ').trim()

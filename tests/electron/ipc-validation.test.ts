@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { validateSettingsPatch, NUMERIC_SETTINGS } from '../../electron/main/settings-validate'
+import { validateSettingsPatch, NUMERIC_SETTINGS, BOOLEAN_SETTINGS } from '../../electron/main/settings-validate'
 import { SETTING_KEYS } from '../../electron/main/config-env'
 
 describe('validateSettingsPatch', () => {
@@ -66,7 +66,7 @@ describe('validateSettingsPatch', () => {
     // 从被测模块导出的那份清单读，不再在测试里复制一份 ——
     // 复制的那份漂过一次了（加 TEMPERATURE 时这里没跟上，红了一次）
     const numeric = NUMERIC_SETTINGS
-    const boolean = new Set(['STREAM', 'LLM_CACHE'])
+    const boolean = BOOLEAN_SETTINGS
     const input: Record<string, string> = {}
     for (const key of SETTING_KEYS) {
       input[key] = numeric.has(key) ? '3' : boolean.has(key) ? '1' : 'value'

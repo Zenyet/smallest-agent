@@ -48,6 +48,17 @@ export interface DesktopSettings {
    * 只对「配了子 agent 但暂时不想让它派活」那种情况有意义。
    */
   SUBAGENT?: string
+  /**
+   * 每轮结束后自动抽取值得记住的事实。'0' = 关。
+   *
+   * 单独给开关是因为它**每轮多一次模型调用**。记忆有两道保险：模型主动调
+   * remember（零成本、会漏）和这个事后提取（不漏、花钱）。用量敏感时
+   * 该能只留第一道。
+   *
+   * 默认开（不写 = 开，同 STREAM / LLM_CACHE / SUBAGENT 的约定）。
+   * runner 里有三道短路让多数轮次不真的调用它，见那边。
+   */
+  AUTO_EXTRACT_FACTS?: string
   // --- 联网搜索的后端凭据（见 src/tools/web.ts 的文件头）---
   //
   // 两个都可选，都不填时 web_search 退到维基百科 —— 那一档不要 key，
@@ -92,6 +103,7 @@ export const SETTING_KEYS = [
   'BRAVE_API_KEY',
   'TAVILY_API_KEY',
   'SUBAGENT',
+  'AUTO_EXTRACT_FACTS',
   ...CUSTOM_KEYS,
   ...keyEnvs(),
 ] as const satisfies readonly (keyof DesktopSettings)[]

@@ -36,9 +36,9 @@ function numFromEnv(value: string | undefined, fallback: number, name: string): 
 // loadConfig：唯一入口，把 env 变量映射成 Config 对象。
 // 默认读 process.env，但接受任意 env 对象（方便测试传入 mock env）。
 // 只有 DEEPSEEK_API_KEY 是强制必填项，其余都有合理默认值。
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const apiKey = env.DEEPSEEK_API_KEY
-  if (!apiKey) {
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, options: { allowMissingApiKey?: boolean } = {}): Config {
+  const apiKey = env.DEEPSEEK_API_KEY ?? ''
+  if (!apiKey && !options.allowMissingApiKey) {
     throw new Error('Missing DEEPSEEK_API_KEY（把 .env.example 复制成 .env 并填好）')
   }
   return {
@@ -67,6 +67,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheDir: env.LLM_CACHE_DIR ?? './.llm-cache',
     // STREAM=0 才关闭流式；同上，默认开启
     stream: env.STREAM !== '0',
+    // 默认开，同 STREAM / LLM_CACHE 的约定（不写 = 开）
+    autoExtractFacts: env.AUTO_EXTRACT_FACTS !== '0',
     // 厂商自带搜索的开关形状，由桌面端按选中的厂商写进来（见
     // electron/main/config-env.ts）。CLI 不写这一项，所以通常是 undefined。
     nativeSearch: parseNativeSearch(env.NATIVE_SEARCH),

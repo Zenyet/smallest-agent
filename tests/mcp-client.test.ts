@@ -19,6 +19,13 @@ function fakeClient(): McpToolClient {
 }
 
 describe('loadMcpTools', () => {
+  it('MCP 错误不能被当成成功的文件内容返回', async () => {
+    const client = fakeClient()
+    client.callTool = async () => ({ isError: true, content: [{ type: 'text', text: 'Permission denied' }] })
+    const reg = await loadMcpTools(client)
+    await expect(reg.get_skill.run({ name: 'x' })).rejects.toThrow('Permission denied')
+  })
+
   it('builds a registry from tools/list', async () => {
     const reg = await loadMcpTools(fakeClient())
     expect(Object.keys(reg)).toEqual(['get_skill'])

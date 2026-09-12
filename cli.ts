@@ -27,6 +27,12 @@ import { makeSummarizer } from './src/memory/summarize'
 import { compactMessages } from './src/memory/compact'
 import { loadMcpToolsFromServers } from './src/mcp/client'
 import { makeVerifier } from './src/verify'
+import { makeRememberTool } from './src/tools/remember'
+import { makeRecallTool } from './src/tools/recall'
+import { makeForgetTool } from './src/tools/forget'
+import { makeExtractor, rememberSucceeded, resolveScope } from './src/memory/extract'
+import { getFacts, rememberFact, forgetFactByKey } from './src/memory/facts-store'
+import { factsFor, renderFacts, scopeFor } from './src/memory/facts'
 
 async function main() {
   const question = process.argv.slice(2).join(' ').trim()
@@ -65,7 +71,39 @@ async function main() {
     // 把本地 RAG 搜索工具和 MCP 工具合并成统一注册表。
     // 展开顺序：mcpTools 在前，searchTool 在后，同名时 searchTool 覆盖（通常不会冲突）。
     const searchTool = makeSearchNotesTool({ store, embed })
-    const registry = { ...mcpTools, [searchTool.name]: searchTool }
+
+    // 注入跨会话事实记忆到系统提示。
+    //
+    // CLI 的「项目」就是它被调用时所在的目录 —— 在 ~/lab/x 里跑 pnpm dev，
+    // 记下的项目事实就属于 ~/lab/x。原来这里硬编码成 undefined（等于没有
+    // 项目作用域），于是模型选 scope:"project" 时会撞上「没有工作目录」。
+    const projectScope = scopeFor(process.cwd())
+
+    // 记忆工具：remember 写入事实，recall 读取事实
+    const rememberTool = makeRememberTool({
+      persist: (input) => rememberFact(input),
+      sessionId: config.sessionId,
+      projectScope,
+    })
+    const recallTool = makeRecallTool({
+      getAllFacts: () => getFacts(),
+      projectScope,
+    })
+    const forgetTool = makeForgetTool({
+      forget: (key, scope) => {
+        forgetFactByKey(key, scope)
+      },
+      getAllFacts: () => getFacts(),
+      projectScope,
+    })
+
+    const registry = {
+      ...mcpTools,
+      [searchTool.name]: searchTool,
+      [rememberTool.name]: rememberTool,
+      [recallTool.name]: recallTool,
+      [forgetTool.name]: forgetTool,
+    }
 
     // --- 流式输出回调 ---
     // onText 在模型生成每个 token 时触发，直接写到 stdout。
@@ -113,6 +151,18 @@ async function main() {
     const history = await sessions.load(config.sessionId)
     if (history.length) console.error(`已载入会话「${config.sessionId}」的 ${history.length} 条历史`)
     const summarize = makeSummarizer(makeCallModel(config, {}))
+
+    const allFacts = getFacts()
+    const relevantFacts = factsFor(allFacts, projectScope)
+    const factsBudget = 600 // 给事实分配最多600 token
+    const factsPrompt = renderFacts(relevantFacts, factsBudget)
+
+    // 把事实追加到系统提示末尾
+    const configWithFacts = {
+      ...config,
+      systemPrompt: factsPrompt ? `${config.systemPrompt}\n\n${factsPrompt}` : config.systemPrompt,
+    }
+
     const compact = (messages: Message[]) =>
       compactMessages(messages, {
         maxTokens: config.maxContextTokens,
@@ -129,10 +179,17 @@ async function main() {
     // 流式模式下最终答案已逐字打出，trace 只打印有工具活动的轮次，避免重复输出。
     // 降幻觉：累积工具证据；流式时不在 trace 里重复打印答案文本
     const evidence: string[] = []
+    /** 这一轮用过哪些工具。自动提取靠它短路（调过 remember 就不必再抽）。 */
+    const toolsUsed = new Set<string>()
     const onTurn = (info: TurnInfo) => {
       // 流式时只打印有工具活动的轮次；最终答案轮已逐字流出，不再打印空的 trace 头
       if (!config.stream || info.toolResults.length > 0) printTurn(info, { showText: !config.stream })
-      for (const tr of info.toolResults) evidence.push(`${tr.name}: ${tr.output}`)
+      for (const tr of info.toolResults) {
+        evidence.push(`${tr.name}: ${tr.output}`)
+        // 只记**成功**的调用：失败的 remember 不该触发抽取的短路
+        // （见 src/memory/extract.ts 的 rememberSucceeded）
+        if (tr.name !== 'remember' || rememberSucceeded(tr.output)) toolsUsed.add(tr.name)
+      }
     }
 
     // ============================================================
@@ -143,7 +200,7 @@ async function main() {
     const answer = await runAgent(question, {
       callModel,
       tools: registry,
-      config,
+      config: configWithFacts,
       onTurn,
       history,
       compact,
@@ -165,6 +222,38 @@ async function main() {
     // verifier 是另一个 LLM-as-Judge 调用，专门检查「答案里有没有不被证据支撑的说法」。
     // 只在 agent 实际调用过工具（有证据）时才核查，纯聊天类问题无需核查。
     // 降幻觉：LLM-as-Judge 核查答案是否被证据支撑
+    // 自动提取事实。放在核查之后 —— 核查的结论要打给用户看，提取只是写盘。
+    //
+    // 三道短路和 Electron 侧一致（见 electron/main/agent-runner.ts）：
+    // 功能关了、模型已经自己调过 remember、用户这句话太短。
+    if (
+      config.autoExtractFacts !== false &&
+      !toolsUsed.has('remember') &&
+      question.trim().length >= 12
+    ) {
+      try {
+        const found = await makeExtractor(makeCallModel(config, {}))({
+          userMessage: question,
+          answer,
+          existing: getFacts(),
+        })
+        for (const f of found) {
+          rememberFact({
+            key: f.key,
+            value: f.value,
+            scope: resolveScope(f.scope, projectScope),
+            sessionId: config.sessionId,
+          })
+        }
+        if (found.length > 0) {
+          console.error(`\n🧠 自动记下 ${found.length} 条：`)
+          for (const f of found) console.error(`  - ${f.value}`)
+        }
+      } catch {
+        // 静默 —— 提取是增强，坏掉不该影响这一轮
+      }
+    }
+
     if (evidence.length > 0) {
       const verdict = await makeVerifier(makeCallModel(config, {}))({ question, answer, evidence })
       if (verdict.grounded) {

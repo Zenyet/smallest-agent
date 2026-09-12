@@ -478,8 +478,10 @@ describe('createAgentRunner 的取消', () => {
 
     expect(saved).toHaveLength(1)
     expect(saved[0].messages).toEqual([
+      // 历史那条来自测试构造的假数据，本来就没有 timestamp
       { role: 'user', content: '上一轮' },
-      { role: 'user', content: '这次的提问' },
+      // 这一轮的提问要带上时刻（取消路径也要打戳，见 runTurn 的 askedAt）
+      { role: 'user', content: '这次的提问', timestamp: expect.any(Number) },
     ])
   })
 

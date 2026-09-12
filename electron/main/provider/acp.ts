@@ -1,3 +1,5 @@
+import { acpPromptContent } from './attachment-content'
+import { userMessage } from '../../../src/attachments'
 // ============================================================================
 // provider/acp.ts —— 驱动外部 agent CLI（Claude Code / Codex / Gemini / …）
 // ----------------------------------------------------------------------------
@@ -38,7 +40,6 @@ import { spawn, type ChildProcessByStdio } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk'
 import { Cancelled } from '../cancel'
-import type { Message } from '../../../src/types'
 import type { ApprovalDecision, ApprovalRequestEvent } from '../../shared/channels'
 import type { Provider, TurnRequest, TurnResult } from './types'
 
@@ -136,33 +137,13 @@ function pickOption(
   return null
 }
 
-/**
- * 把之前的历史压成一段前言。
- *
- * ## 为什么需要它
- *
- * CLI 自己管对话历史，但**只管它自己经手的那些**。用户可能先用内置 agent 聊
- * 了几轮再切到 Claude Code，那几轮在我们的会话文件里、不在 CLI 那侧。
- * 不带过去的话它会以为对话刚开始。
- *
- * 只在这个 ACP 会话的**第一轮**带（之后 CLI 自己记得），而且只带用户和助手的
- * 正文 —— 工具轨迹不带：那些是内置 agent 用我们的工具做的事，对 CLI 没有意义，
- * 而且会把前言撑得很长。
- */
-function historyPreamble(history: Message[]): string | null {
-  const lines = history
-    .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim() !== '')
-    .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.content}`)
-  if (lines.length === 0) return null
-  return `（以下是这次对话之前的记录，供你参考）\n${lines.join('\n\n')}`
-}
-
 export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { dispose(): void } {
   // stderr 是 'inherit'（透传给我们的终端），所以类型上它是 null ——
   // ChildProcessWithoutNullStreams 对不上。写成精确的那个三元组
   let child: ChildProcessByStdio<Writable, Readable, null> | null = null
   let conn: acp.ClientConnection | null = null
   let ctx: acp.ClientContext | null = null
+  let promptCapabilities: acp.PromptCapabilities = {}
   /** 我们的 sessionId → ACP 的 ActiveSession */
   const sessions = new Map<string, acp.ActiveSession>()
   /**
@@ -266,12 +247,13 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
 
     // 握手。失败要把子进程收掉 —— 否则一个连不上的 npx 会一直挂在那儿
     try {
-      await connection.agent.request(acp.methods.agent.initialize, {
+      const initialized = await connection.agent.request(acp.methods.agent.initialize, {
         protocolVersion: acp.PROTOCOL_VERSION,
         // 不声明 fs / terminal 能力：那些 CLI 自己就有文件访问和终端，
         // 声明了等于多一条要审批的路径，而它们并不需要我们代劳。
         clientCapabilities: {},
       })
+      promptCapabilities = initialized.agentCapabilities?.promptCapabilities ?? {}
     } catch (err) {
       reset()
       throw new Error(
@@ -293,6 +275,7 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
     slots.clear()
     conn = null
     ctx = null
+    promptCapabilities = {}
     child = null
   }
 
@@ -319,11 +302,11 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
       req.token.throwIfCancelled()
 
       req.emit({ kind: 'notice', text: `正在连接 ${spec.name}…` })
-      const { session, fresh } = await ensureSession(req)
-
-      // 第一轮把我们这侧的历史当前言带过去，见 historyPreamble 的注释
-      const preamble = fresh ? historyPreamble(req.history) : null
-      const prompt = preamble ? `${preamble}\n\n---\n\n${req.question}` : req.question
+      await ensureConnected()
+      // 能力校验在创建会话之前，失败后重发仍会正确带上历史。
+      const prompt = acpPromptContent(req.question, req.attachments,
+        sessions.has(req.sessionId) ? [] : req.history, promptCapabilities)
+      const { session } = await ensureSession(req)
 
       // 按 ACP 那侧的 sessionId 登记，权限请求 handler 靠它找回归属
       slots.set(session.sessionId, { sessionId: req.sessionId })
@@ -433,8 +416,11 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
         // 我们拿到的形状（turn 填 0、args 常常是空）写进历史文件也重建不出来。
         await req.onComplete([
           ...req.history,
-          { role: 'user', content: req.question },
-          { role: 'assistant', content: answer },
+          // 两条戳同一时刻：ACP 那侧不告诉我们提问是什么时候进去的，
+          // 只有「这一轮结束了」这一个时间点。宁可两条一样，
+          // 也不编一个更早的提问时刻。
+          userMessage(req.question, req.attachments),
+          { role: 'assistant', content: answer, timestamp: Date.now() },
         ])
 
         // evidence 空：外部 CLI 自己管工具，我们拿不到可比对的证据，

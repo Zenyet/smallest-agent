@@ -7,7 +7,7 @@ export const NUMERIC_SETTINGS = new Set(['MAX_RETRIES', 'MAX_TURNS', 'MAX_CONTEX
 
 // 布尔型设置：src/config.ts 用 `!== '0'` 判断真假，只区分 '0' 和其它值。
 // 允许 '0' / '1' / '' 这三个实际被区分的值，拒绝其它随意字符串（避免误导）。
-const BOOLEAN_SETTINGS = new Set(['STREAM', 'LLM_CACHE'])
+export const BOOLEAN_SETTINGS = new Set(['STREAM', 'LLM_CACHE', 'SUBAGENT', 'AUTO_EXTRACT_FACTS'])
 
 export interface ValidationResult {
   valid: DesktopSettings

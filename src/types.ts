@@ -53,7 +53,21 @@ export interface ToolCall {
 //   - tool (工具结果)         → toolCallId + name 有值，与 ToolCall.id 对应
 //   - system / user / assistant (纯文本) → 只用 content
 //   - user (多模态)           → contentParts 有值（图片 + 文件）
+export interface TokenUsage {
+  vendorId?: string
+  model?: string
+  inputTokens?: number
+  outputTokens?: number
+  totalTokens?: number
+  cacheReadTokens?: number
+  reasoningTokens?: number
+  contextTokens?: number
+  localCacheHit?: boolean
+}
+
 export interface Message {
+  usage?: TokenUsage
+  usages?: TokenUsage[] // completed calls retained when a desktop turn is interrupted
   role: Role
   /**
    * 纯文本内容（向后兼容）。
@@ -68,11 +82,23 @@ export interface Message {
   toolCalls?: ToolCall[]   // 仅出现在"请求调用工具"的 assistant 消息上
   toolCallId?: string      // 仅出现在 tool 消息上（回答的是哪个 call）
   name?: string            // 工具名，仅出现在 tool 消息上
+  /**
+   * 这条消息发生的时刻（Date.now()）。
+   *
+   * 可选，因为**旧会话文件里没有这个字段** —— 那些消息我们确实不知道它们
+   * 是什么时候发生的，界面上就不显示时间，而不是拿存盘时刻冒充（那会把
+   * 三天前的提问标成「今天 14:32」，比不显示更糟）。
+   *
+   * 在消息**创建时**打戳，不在存盘时补：存盘发生在一轮结束，用它当时刻的话，
+   * 用户 14:00 发的问题会被标成 14:05（模型答完的时刻）。
+   */
+  timestamp?: number
 }
 
 // callModel 每次调用的返回值：文本回答 + 这轮想调的工具列表（可能为空）。
 // agent.ts 根据 toolCalls.length 判断「继续循环」还是「终止返回 text」。
 export interface ModelResult {
+  usage?: TokenUsage
   text: string
   toolCalls: ToolCall[]
   /**
@@ -103,7 +129,20 @@ export interface ServerToolCall {
 // callModel 的函数签名别名。
 // agent.ts 只依赖这个签名而不引入 llm.ts，所以测试时可以直接注入一个
 // 返回固定 ModelResult 的假函数，不需要真正调 API。
-export type CallModel = (messages: Message[]) => Promise<ModelResult>
+/**
+ * signal：中断进行中的那次 HTTP 请求。
+ *
+ * 为什么它必须一路传到这儿：一轮里最长的等待是「等模型响应」，而那是一次
+ * HTTP 请求 —— 在 SDK 里面、在 undici 里面，我们的循环没有执行权。轮询查
+ * 不到它，回调也没有能打断它的手段。AbortSignal 是唯一能真正中断
+ * 进行中的 fetch 的机制。
+ *
+ * 不传就是「不可中断」（CLI 那条路、测试里的假实现都不传）。
+ */
+export type CallModel = (
+  messages: Message[],
+  signal?: AbortSignal,
+) => Promise<ModelResult>
 
 // 单个工具的描述 + 执行函数。
 // parameters 是 zod schema，在 llm.ts 里会被转成模型能理解的 JSON Schema 格式
@@ -146,6 +185,14 @@ export interface Config {
   cacheDir: string           // 缓存目录
   stream: boolean            // 是否流式打印最终答案
   /**
+   * 每轮结束后自动抽取值得记住的事实。不填 = 开。
+   *
+   * 关掉之后记忆只靠模型主动调 remember —— 那条路零成本但会漏
+   * （见 src/memory/extract.ts 的文件头）。留这个开关是因为它每轮多一次
+   * 模型调用，用量敏感的场景该能关掉。
+   */
+  autoExtractFacts?: boolean
+  /**
    * 这家厂商自带的联网搜索怎么开。不填 = 没有（用我们自己的 web_search）。
    *
    * ## 为什么是「怎么开」而不是「有没有」
@@ -176,6 +223,14 @@ export interface Config {
    * 端点、请求体、响应形状三样，不是「换个开关」。
    */
   protocol?: 'chat' | 'responses'
+  /**
+   * 替换底层的 fetch。**只给测试用**，生产路径不设置（SDK 用全局 fetch）。
+   *
+   * 存在的理由：验证「取消能真的中断进行中的请求」需要拿到 SDK 交给 fetch
+   * 的那个 `init.signal`。没有这个注入口，就只能逐层单测「这一层把 signal
+   * 传给了下一层」—— 而那正是漏掉真问题的方式：每层都对，链子还是断的。
+   */
+  fetch?: typeof fetch
 }
 
 /**

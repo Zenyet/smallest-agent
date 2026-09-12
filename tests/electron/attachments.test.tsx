@@ -162,6 +162,55 @@ describe('附件被拒时', () => {
 })
 
 describe('附件的生命周期', () => {
+  it('发送回调收到文件正文，单独发送附件也可用', async () => {
+    const send = vi.fn()
+    setup({ onSend: send })
+    pick([new File(['# 项目说明'], 'README.md', { type: 'text/markdown' })])
+    await waitFor(() => expect(screen.getByText('README.md')).toBeTruthy())
+    await waitFor(() => expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    expect(send).toHaveBeenCalledWith('', [expect.objectContaining({
+      type: 'file', filename: 'README.md', mimeType: 'text/markdown', data: expect.stringContaining('base64,'),
+    })])
+  })
+
+  it('失败后恢复文字和附件，重试仍能传递文件内容', async () => {
+    const send = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValue(true)
+    setup({ onSend: send })
+    pick([makeFile('a.png', 'image/png')])
+    await waitFor(() => expect(screen.getByAltText('a.png')).toBeTruthy())
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '看这个' } })
+    await waitFor(() => expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(screen.getByDisplayValue('看这个')).toBeTruthy())
+    expect(screen.getByAltText('a.png')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    await waitFor(() => expect(send).toHaveBeenCalledTimes(2))
+    expect(send.mock.calls[1][1]).toEqual(send.mock.calls[0][1])
+  })
+
+  it('切换会话后到达的失败不会把旧附件恢复到新会话', async () => {
+    let fail!: (reason: Error) => void
+    const { view } = setup({ onSend: () => new Promise((_resolve, reject) => { fail = reject }) })
+    pick([makeFile('a.png', 'image/png')])
+    await waitFor(() => expect(screen.getByAltText('a.png')).toBeTruthy())
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: '看这个' } })
+    await waitFor(() => expect((screen.getByRole('button', { name: '发送' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: '发送' }))
+    view.rerender(<ChatWindow chat={chat} sessionId="s2" onSend={() => {}} onDecide={() => {}} />)
+    fail(new Error('offline'))
+    await waitFor(() => expect(screen.queryByAltText('a.png')).toBeNull())
+    view.rerender(<ChatWindow chat={chat} sessionId="s1" onSend={() => {}} onDecide={() => {}} />)
+    await waitFor(() => expect(screen.getByAltText('a.png')).toBeTruthy())
+  })
+
+  it('系统未提供 MIME 时识别 Markdown 扩展名', async () => {
+    setup()
+    pick([new File(['# README'], 'README.md')])
+    await waitFor(() => expect(screen.getByText('README.md')).toBeTruthy())
+    expect(screen.queryByText(/不支持的类型/)).toBeNull()
+  })
+
   it('发送后清空', async () => {
     setup()
     pick([makeFile('a.png', 'image/png')])

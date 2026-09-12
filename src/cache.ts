@@ -25,12 +25,13 @@ export interface ResultCache {
   set(key: string, value: ModelResult): Promise<void>
 }
 
-// 生成缓存 key：sha256(prefix + '\n' + JSON.stringify(messages))，取前 32 位十六进制。
+// 生成缓存 key：sha256(model prefix + 消息 JSON)，取前 32 位十六进制。
+// 用量是响应元数据，不参与请求缓存键。
 // prefix 通常是 model id（如 "deepseek-chat"），保证不同模型的缓存互不干扰——
 // 即使 messages 完全相同，不同模型的输出也可能不同，必须分开存。
 export function cacheKey(prefix: string, messages: unknown): string {
   return createHash('sha256')
-    .update(`${prefix}\n${JSON.stringify(messages)}`)
+    .update(`${prefix}\n${JSON.stringify(Array.isArray(messages) ? messages.map(({ usage, usages, ...message }) => message) : messages)}`)
     .digest('hex')
     .slice(0, 32)
 }
@@ -68,14 +69,16 @@ export function withCache(
   keyPrefix: string,
   onHit?: () => void,
 ): CallModel {
-  return async (messages) => {
+  // signal 透传：这一层也是装饰器，漏了内层就拿不到（见 types.ts 的
+  // CallModel 注释 —— 整条链上任何一层漏掉都会让「停止」失效）
+  return async (messages, signal) => {
     const key = cacheKey(keyPrefix, messages)
     const hit = await cache.get(key)
     if (hit) {
       onHit?.()
       return hit  // 缓存命中：不联网，直接返回已有结果
     }
-    const result = await callModel(messages)
+    const result = await callModel(messages, signal)
     // 写缓存失败（如磁盘满）会抛出，但这属于环境问题而非业务问题，
     // 让它向上传播比静默吞掉更容易排查。
     await cache.set(key, result)

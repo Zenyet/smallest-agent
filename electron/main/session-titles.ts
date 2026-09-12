@@ -81,3 +81,54 @@ export function forgetTitle(titles: SessionTitles, id: string): SessionTitles {
   delete next[id]
   return next
 }
+
+/**
+ * 第一次落盘时锁定的自动标题（sessionId → 标题）。
+ *
+ * ## 为什么需要它，而不是每次从历史重推
+ *
+ * 原来侧边栏的标题是每次 listSessions 都用 sessionTitle(messages) 现推的。
+ * 那意味着标题跟着**文件内容**走，而文件内容会变：
+ *
+ *   • 上下文压缩把一条 `【之前对话摘要】…` 插到历史最前面，且它的 role
+ *     是 'user'（compact.ts:59，那样才能过持久化的 filter）。于是「第一条
+ *     user」变成那段摘要，侧边栏名字变成一大段 markdown。实测发生过。
+ *   • 编辑重发砍掉前面几轮之后，第一条 user 换人了。
+ *
+ * 两种情况下用户什么都没做，名字自己改了 —— 而侧边栏的名字是他用来
+ * 认「哪个是哪个」的锚点，它不该动。
+ *
+ * ## 和用户手改的那份（SessionTitles）分开存
+ *
+ * 优先级是「用户改的 > 自动锁定的 > 现推的兜底」。合成一张表的话，
+ * 「恢复自动标题」（改名传空字符串）就没法表达 —— 删掉那条之后分不清
+ * 是该回到锁定值还是重新推。
+ */
+export type AutoTitles = Record<string, string>
+
+/**
+ * 锁定一个自动标题。**已经有了就不动** —— 这是「第一次定下就不再变」的落点。
+ *
+ * 返回新表；没变化时原样返回同一个对象（调用方用引用比较跳过写盘）。
+ */
+export function lockAutoTitle(auto: AutoTitles, id: string, title: string): AutoTitles {
+  // 已锁定 → 不覆盖。这一条就是整个修复的核心。
+  if (auto[id]) return auto
+  const trimmed = title.trim().slice(0, TITLE_MAX)
+  // 空标题不锁：那通常是「这个会话还没有用户消息」，等下一轮再定
+  if (!trimmed || trimmed === '新会话') return auto
+  return { ...auto, [id]: trimmed }
+}
+
+/** 会话删了，锁定的标题也是垃圾。约定同 forgetTitle。 */
+export function forgetAutoTitle(auto: AutoTitles, id: string): AutoTitles {
+  if (!(id in auto)) return auto
+  const next = { ...auto }
+  delete next[id]
+  return next
+}
+
+/** 规范化，同 normalizeTitles 的理由。 */
+export function normalizeAutoTitles(raw: unknown): AutoTitles {
+  return normalizeTitles(raw)
+}

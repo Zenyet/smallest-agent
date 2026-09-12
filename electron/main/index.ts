@@ -5,10 +5,12 @@ import { fileURLToPath } from 'node:url'
 import { CH } from '../shared/channels'
 import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
+import { createSettingsStatus, validateSettingsUpdate } from './settings-update'
 import { ownServerSpec } from './mcp-paths'
 import { createFsToolsPool } from './fs-tools'
 import { createRuntime, type AgentRuntime } from './agent-runtime'
 import { setupIpcHandlers, setupProviderHandlers } from './ipc-handlers'
+import { migrateLegacyFacts } from './facts-store'
 import { createApprovalGate } from './approval'
 import { toErrorEvent } from './errors'
 import { buildMenuTemplate } from './app-menu'
@@ -75,19 +77,60 @@ function createWindow(): BrowserWindow {
     // 不一致的话启动瞬间会闪一下别的颜色。（之前这里是 #05070C，是移植参考站
     // token 之前的旧调色板，一直没跟着改。）
     backgroundColor: '#17181a',
-    // hiddenInset：去掉 macOS 那条白色原生标题栏，只留左上角三个圆点，
-    // 标题栏区域交给我们自己画。不用 frame: false —— 那样连红绿灯按钮都没了，
-    // 得自己实现关闭/最小化，代价远大于收益。
-    titleBarStyle: 'hiddenInset',
-    // Windows/Linux 上 titleBarStyle 无效，用 overlay 把系统按钮画成深色，
-    // 免得深色界面顶上贴一条亮色控件条。
-    titleBarOverlay: { color: '#17181a', symbolColor: '#a5a8ad', height: 36 },
+    // frame + transparent 的组合，是为了干掉窗口顶上那条亮线。
+    //
+    // ## 那条线是什么
+    //
+    // 它是 macOS 给**圆角窗口**画的顶部高光描边（模拟光从上方来），由
+    // WindowServer 合成，所以 DevTools 里查不到 —— 它根本不在网页那一层，
+    // CSS 改不掉。实测这一条 1px 是 rgb(160,161,162)，而左/右/底三条边
+    // 只有 rgb(46,47,49)，亮三倍多，在这套近黑的深色 UI 上格外扎眼。
+    //
+    // ## 为什么是这个组合（六种配置的实测结果）
+    //
+    //   titleBarStyle:'hiddenInset'          顶边 157  ← 有线
+    //   titleBarStyle:'hidden'               顶边 160  ← 有线
+    //   frame:false                          顶边 160  ← 有线
+    //   frame:false + roundedCorners:false   顶边  46  干净，但**圆角没了**
+    //   frame:false + transparent:true       顶边  46  干净，且圆角还在  ← 用这个
+    //
+    // 两个 titleBarStyle 只是把标题栏画成透明，窗口该有的圆角高光一条不少，
+    // 所以它们俩都不解决问题（这也是之前几次改动都没效果的原因）。
+    // transparent:true 让 AppKit 不再自己画窗口底，那条高光随之消失，
+    // 而圆角由 Chromium 那侧保留 —— 实测左上角仍是一段圆弧。
+    //
+    // 代价一：红绿灯跟着 frame:false 一起没了，用下面的
+    // setWindowButtonVisibility(true) 要回来（实测 transparent 下颜色正常，
+    // 非激活态显示为深色圆点是 macOS 一贯行为，跟透明无关）。
+    // 代价二：backgroundColor 失效（窗口底由网页自己画），所以下面改成
+    // ready-to-show 之后再显示，见那里。
+    frame: false,
+    transparent: true,
+    // 透明窗口在 renderer 画出第一帧之前是**真的透明**（backgroundColor 不再兜底），
+    // 直接显示会看到一个能透视桌面的窗口闪一下。等首帧准备好再显示。
+    show: false,
+    // 红绿灯纵向居中在侧边栏顶部那条 28px 拖拽条里：(28 - 16) / 2 = 6
+    trafficLightPosition: { x: 14, y: 6 },
+    // Windows/Linux 没有红绿灯，frame:false 之后系统按钮要靠 overlay 画回来
+    // （这也是 Windows 自定义标题栏的标准做法）。macOS 不需要。
+    ...(process.platform !== 'darwin' ? {
+      titleBarOverlay: { color: '#17181a', symbolColor: '#a5a8ad', height: 36 },
+    } : {}),
     webPreferences: {
       preload: join(here, '../preload/preload.cjs'),
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
+
+  // frame: false 把红绿灯也一起去掉了，这里单独要回来。
+  // 只有 macOS 有这个方法（也只有 macOS 有红绿灯）。
+  if (process.platform === 'darwin') win.setWindowButtonVisibility(true)
+
+  // show: false 的配套：首帧就绪就显示。
+  // once 而不是 on —— 这个事件在每次导航后都会再发一次（dev 下改代码热重载
+  // 就是一次导航），只需要第一次那回。
+  win.once('ready-to-show', () => win.show())
 
   // 开发时连 vite dev server（热重载），生产时加载构建产物
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -110,6 +153,11 @@ function broadcast(channel: string, payload: unknown): void {
 
 app.whenReady().then(async () => {
   ipcMain.handle(CH.ping, () => 'pong')
+
+  // 记忆从旧路径（userData/memory.json）迁到共享的 ~/.smallest-agent/facts.json。
+  // 一次性、幂等、失败不阻塞启动 —— 见 facts-store.ts。
+  // 必须在 setupIpcHandlers 之前：那之后 renderer 随时可能来读记忆。
+  migrateLegacyFacts()
 
   // openSettings 跟 ping 一样尽早注册、不等 createRuntime：设置窗口的入口
   // （侧边栏齿轮、⌘,）在启动画面期间就该能用 —— 启动失败最常见的原因就是
@@ -169,6 +217,13 @@ app.whenReady().then(async () => {
   // 也会在 did-fail-load / 超时后放行，不会让下面的 try/catch 永远够不到。）
   await waitForInitialLoad(win)
 
+  // ready-to-show 的兜底：那个事件在首次导航失败时不会发（dev server 没起来、
+  // 生产包路径错了），而 show:false 意味着窗口会**永远不出现** —— 用户看到的是
+  // 应用启动了却没有界面，连报错都看不见。waitForInitialLoad 不管成功失败都会
+  // 放行（见它的文件头），在这里补一次 show 兜住那条路径。
+  // show() 是幂等的，正常路径上 ready-to-show 已经显示过，这次调用无副作用。
+  if (!win.isDestroyed()) win.show()
+
   let runtime: AgentRuntime | undefined
   let quitting = false
   // setupIpcHandlers 的返回值。before-quit 要用它收子进程，而那个 handler
@@ -207,12 +262,15 @@ app.whenReady().then(async () => {
 
   win.on('close', cancelAllPending)
 
+  const startupSettings = getSettings()
+  const settingsStatus = createSettingsStatus(process.env, startupSettings)
+  ipcMain.handle(CH.getSettingsStatus, () => settingsStatus(getSettings()))
   try {
     const paths = {
       sessionsDir: join(app.getPath('userData'), 'sessions'),
       cacheDir: join(app.getPath('userData'), 'llm-cache'),
     }
-    const config = loadConfig(buildEnv(process.env, getSettings(), paths))
+    const config = loadConfig(buildEnv(process.env, startupSettings, paths), { allowMissingApiKey: true })
 
     const pathsInput = {
       isDev,
@@ -222,12 +280,17 @@ app.whenReady().then(async () => {
       notesDir: config.notesDir,
     }
 
+    let handlersReady = false
+    let runtimeStatus: RuntimeStatusEvent = { phase: 'ready', detail: '可以开始对话' }
     runtime = await createRuntime(
       config,
       // fs server 不在这里了：它的允许目录是沙箱边界，要跟着会话所属的
       // 项目变，所以按目录懒建（见 fs-tools.ts）
       { own: ownServerSpec(pathsInput) },
-      sendStatus,
+      (status) => {
+        runtimeStatus = status
+        if (handlersReady) sendStatus(status)
+      },
       {},
       // 每次搜索时重新读设置，而不是在这里取一次值 —— 用户可能跑起来之后
       // 才去填 key，取值的话得重启才生效（其它设置项都是即时的）。
@@ -246,6 +309,8 @@ app.whenReady().then(async () => {
     // before-quit 在这之前就注册了（它要能处理「启动到一半就退出」），
     // 所以用一个可变引用把它接上，而不是把注册挪到这儿
     runnerRef = runnerInterface
+    handlersReady = true
+    sendStatus(runtimeStatus)
 
     // 健康路径的重启：只允许在没有活跃工作（运行中的 turn 或待审批）时调用。
     // Task 14 把 restartApp 移到失败态专用是为了避免不加防护的"随时可 quit"——
@@ -300,8 +365,9 @@ app.whenReady().then(async () => {
     // 所以除了读写设置，provider 探测/导入也要补上 —— 面板挂载时就会调
     // detectProviders，而「从 Claude Code 导入」往往是修好这次失败最快的办法。
     ipcMain.handle(CH.getSettings, () => getSettings())
-    ipcMain.handle(CH.saveSettings, (_e, patch) => {
-      const next = saveSettings(patch)
+    ipcMain.handle(CH.saveSettings, (_e, raw: unknown, rawUnset: unknown) => {
+      const { valid, unset } = validateSettingsUpdate(raw, rawUnset)
+      const next = saveSettings(valid, unset)
       // 广播，跟健康路径一致：设置窗口自己也订阅这条，靠它把 needsRestart 的
       // 比较基线推进（否则保存成功后重启警告不会消失）。
       broadcast(CH.settingsChanged, next)

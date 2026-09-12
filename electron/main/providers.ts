@@ -52,6 +52,8 @@ export const BUILTIN_NAME = '内置 agent'
  * 自己发 HTTP 时用的模型名，这个的 id 是要塞进别人进程的字符串。
  */
 export interface CliModel {
+  /** Configured context capacity for this exact CLI model. */
+  contextWindow?: number
   id: string
   /** 显示名（"Claude Sonnet 5"） */
   name: string
@@ -79,9 +81,20 @@ export interface ExternalProvider {
    */
   cwd?: string
   /**
-   * 关掉的不出现在选择器里。模板里预置的几家都是 disabled ——
-   * 它们要 npx 拉包（首次几十秒）且要各自的认证，不该在用户没看过配置的
-   * 情况下就出现在选择器里。
+   * @deprecated 用顶层的 `disabledProviders` 黑名单代替。
+   *
+   * 这个字段只为**读旧配置**保留：normalizeProvidersState 会把它迁移进
+   * disabledProviders，之后不再写出。见那个函数里的迁移段。
+   *
+   * ## 为什么换成黑名单
+   *
+   * 原来模板里五家 CLI 全带 `disabled: true`，理由是「要 npx 拉包 + 各自
+   * 认证，不该在用户没看过配置时就出现」。结果是**用户以为功能不存在** ——
+   * 选择器里只有内置 agent 一项，而「去手改 JSON」这条路没人会自己发现。
+   *
+   * waku 的做法是反的：配置里只记 `disabled_providers: []`（黑名单，默认
+   * 空 = 全部可用），CLI 本身内置在代码里。装了就能用，没装的选了给一句
+   * 清楚的错误 —— 藏起来的代价比报错的代价大得多。
    */
   disabled?: boolean
   /** 这个 CLI 支持哪些模型。空表示不提供选择（用它的默认模型）。 */
@@ -172,6 +185,15 @@ export interface ProvidersState {
   sessionPermission: Record<string, PermissionMode>
   /** 新会话默认用哪个。 */
   defaultProvider?: string
+  /**
+   * 不想在选择器里看到的 provider id（黑名单）。
+   *
+   * 默认空 = 配好的 CLI 全部可选。这和原来那套「每家一个 disabled: true」
+   * 是相反的默认值，理由见 ExternalProvider.disabled 的注释。
+   *
+   * 内置 agent 不受它影响 —— 那是「至少有一个能用」的保底。
+   */
+  disabledProviders: string[]
 }
 
 export function emptyProvidersState(): ProvidersState {
@@ -181,6 +203,7 @@ export function emptyProvidersState(): ProvidersState {
     sessionModel: {},
     builtinModel: {},
     sessionPermission: {},
+    disabledProviders: [],
   }
 }
 
@@ -212,6 +235,7 @@ function normalizeCliModel(raw: unknown): CliModel | null {
   const args = Array.isArray(m.args) ? m.args.filter((a): a is string => typeof a === 'string') : []
   return {
     id: m.id,
+    ...(Number.isSafeInteger(m.contextWindow) && m.contextWindow! > 0 ? { contextWindow: m.contextWindow } : {}),
     // 没写显示名就用 id 本身 —— 显示一个空标签比显示 id 更糟
     name: typeof m.name === 'string' && m.name !== '' ? m.name : m.id,
     ...(Object.keys(strRecord(m.env)).length > 0 ? { env: strRecord(m.env) } : {}),
@@ -239,7 +263,9 @@ function normalizeExternal(raw: unknown): ExternalProvider | null {
     ...(args.length > 0 ? { args } : {}),
     ...(Object.keys(strRecord(p.env)).length > 0 ? { env: strRecord(p.env) } : {}),
     ...(typeof p.cwd === 'string' && p.cwd !== '' ? { cwd: p.cwd } : {}),
-    ...(p.disabled === true ? { disabled: true } : {}),
+    // **不透传 disabled**：它已经被 normalizeProvidersState 收进顶层的
+    // disabledProviders 了（见那边的迁移段）。这里再留一份的话，
+    // 用户之后想启用某家就得两个地方都改 —— 而他只看得到一个。
     ...(models.length > 0 ? { models } : {}),
   }
 }
@@ -312,12 +338,46 @@ export function normalizeProvidersState(raw: unknown): ProvidersState {
       ? obj.defaultProvider
       : undefined
 
+  // 黑名单。两个来源合并：
+  //
+  //   1. 顶层 disabledProviders —— 新格式，用户显式排除的
+  //   2. 各 external 上残留的 disabled: true —— 旧格式，迁移过来
+  //
+  // ## 为什么必须迁移，不能直接忽略旧字段
+  //
+  // 忽略的话，已经在用的人升级后五家 CLI 会突然全部冒出来 —— 而他可能
+  // 特意留着 disabled（比如装了但不想在这个 app 里用）。那是「升级悄悄
+  // 改了我的配置」，比默认值选错更糟。
+  //
+  // 迁移是一次性的：normalize 之后写回磁盘的 external 不再带 disabled
+  // （见 normalizeExternal —— 它现在不透传那个字段了），所以下次读到的
+  // 就只有顶层黑名单。
+  //
+  // 只保留认识的 id：external 里已经没有的条目留在黑名单里没意义，
+  // 而且会随每次写盘一直堆积。
+  const disabled = new Set<string>()
+  if (Array.isArray(obj.disabledProviders)) {
+    for (const id of obj.disabledProviders) {
+      if (typeof id === 'string' && seen.has(id)) disabled.add(id)
+    }
+  }
+  if (Array.isArray(obj.external)) {
+    for (const item of obj.external) {
+      if (!item || typeof item !== 'object') continue
+      const p = item as Partial<ExternalProvider>
+      if (p.disabled === true && typeof p.id === 'string' && seen.has(p.id)) {
+        disabled.add(p.id)
+      }
+    }
+  }
+
   return {
     external,
     sessionProvider,
     sessionModel,
     builtinModel,
     sessionPermission,
+    disabledProviders: [...disabled],
     ...(defaultProvider ? { defaultProvider } : {}),
   }
 }
@@ -381,15 +441,41 @@ export interface ProviderOption {
 }
 
 /**
+ * 启用/停用一个外部 CLI（写黑名单）。
+ *
+ * 纯函数、返回新状态 —— 和 assignProvider 那几个同一个约定，
+ * 落盘和广播由 ipc-handlers 负责。
+ *
+ * 内置 agent 拒绝停用：它是「至少有一个能用」的保底，停掉之后
+ * 选择器会是空的，用户没法把会话切回任何东西。
+ * 认不出的 id 原样返回，不往黑名单里塞垃圾。
+ */
+export function toggleProvider(
+  state: ProvidersState,
+  providerId: string,
+  enabled: boolean,
+): ProvidersState {
+  if (providerId === BUILTIN_ID) return state
+  if (!state.external.some((e) => e.id === providerId)) return state
+  const hidden = new Set(state.disabledProviders)
+  if (enabled) hidden.delete(providerId)
+  else hidden.add(providerId)
+  return { ...state, disabledProviders: [...hidden] }
+}
+
+/**
  * 选择器里列哪些。内置永远第一个，后面跟着没被 disable 的外部 CLI。
  *
  * 内置永远在：它不需要配置也不会起不来，是那个「至少有一个能用」的保底。
  */
 export function providerOptions(state: ProvidersState): ProviderOption[] {
+  // 黑名单过滤。默认空 = 配好的全部可选（和原来「全部 disabled」相反，
+  // 理由见 ExternalProvider.disabled 的注释）。
+  const hidden = new Set(state.disabledProviders)
   return [
     { id: BUILTIN_ID, name: BUILTIN_NAME, external: false },
     ...state.external
-      .filter((e) => !e.disabled)
+      .filter((e) => !hidden.has(e.id))
       .map((e) => ({ id: e.id, name: e.name, external: true })),
   ]
 }
@@ -551,7 +637,6 @@ export function exampleProvidersState(): ProvidersState {
         name: 'Claude Code',
         command: 'npx',
         args: ['-y', '@agentclientprotocol/claude-agent-acp@latest'],
-        disabled: true,
         // 没实测 claude-agent-acp 是否真的读 ANTHROPIC_MODEL。这是 Claude Code
         // 的标准环境变量，适配器大概率透传。填错的后果是 CLI 用它的默认模型
         // （不会崩），换个变量名再试即可
@@ -569,7 +654,6 @@ export function exampleProvidersState(): ProvidersState {
         name: 'Codex',
         command: 'npx',
         args: ['-y', '@agentclientprotocol/codex-acp@latest'],
-        disabled: true,
         models: [
           argModel('gpt-5.2', 'GPT-5.2'),
           argModel('gpt-5.1', 'GPT-5.1'),
@@ -582,7 +666,6 @@ export function exampleProvidersState(): ProvidersState {
         command: 'npx',
         // Gemini CLI 原生支持 ACP，不用适配器
         args: ['-y', '@google/gemini-cli@latest', '--experimental-acp'],
-        disabled: true,
         models: [
           argModel('gemini-3-pro', 'Gemini 3 Pro'),
           argModel('gemini-3-flash', 'Gemini 3 Flash'),
@@ -593,7 +676,6 @@ export function exampleProvidersState(): ProvidersState {
         name: 'Pi',
         command: 'npx',
         args: ['-y', 'pi-acp@latest'],
-        disabled: true,
         // 版本号还在 0.0.x，模型清单先留空 —— 用它的默认模型，
         // 免得写一串猜的 id 让人以为是验证过的
         models: [],
@@ -603,7 +685,6 @@ export function exampleProvidersState(): ProvidersState {
         name: 'DeepSeek Harness',
         command: 'npx',
         args: ['-y', 'deepseek-acp@latest'],
-        disabled: true,
         models: [],
       },
     ],

@@ -127,6 +127,39 @@ export class CancelToken {
   throwIfCancelled(): void {
     if (this.#cancelled) throw new Cancelled()
   }
+
+  /**
+   * 把这个令牌接到 fetch 的 AbortSignal 上。
+   *
+   * ## 为什么必须有这个
+   *
+   * 前面那几个方法（isCancelled / throwIfCancelled / onCancel）都只能在
+   * **我们自己的代码**里生效。但一轮里最长的那段等待是「等模型响应」——
+   * 那是一次 HTTP 请求，在 SDK 里面、在 undici 里面，我们的循环压根没有
+   * 执行权。轮询查不到它，onCancel 回调也没有能打断它的手段。
+   *
+   * 结果就是用户报的「点停止无效」：令牌置位了、cancel() 返回 true，
+   * 而那次请求继续跑到底（流式回答的绝大部分时间都在这儿），要等它自己
+   * 结束、循环回到顶部才看见取消 —— 用户已经等了几十秒。
+   *
+   * AbortSignal 是唯一能真正中断进行中的 fetch 的机制。签名做成
+   * 「返回一个 signal」而不是「接受一个 controller」，是为了让调用方
+   * （call-model.ts）不用自己管 controller 的生命周期。
+   *
+   * 已经取消的话返回一个**已经 aborted** 的 signal —— 那时 fetch 会立刻
+   * 拒绝，不会真的发出去。
+   */
+  signal(): AbortSignal {
+    const controller = new AbortController()
+    if (this.#cancelled) {
+      controller.abort()
+      return controller.signal
+    }
+    // 不保存退订函数：令牌是一次性的（每轮新建），而这个 signal 的生命周期
+    // 和它一样长。cancel() 里 listeners.clear() 会统一收掉。
+    this.onCancel(() => controller.abort())
+    return controller.signal
+  }
 }
 
 /**
@@ -135,8 +168,21 @@ export class CancelToken {
  * 顺着 cause 链找而不是只看顶层：错误经过几层包装后，顶层的 message
  * 可能完全看不出是取消（rs 侧用 anyhow 的 chain 做同一件事）。
  *
- * 用 instanceof 而不是比字符串或看 name —— 后两者会把
- * `new Error('已取消')` 误判成真取消。
+ * ## 两种取消
+ *
+ * 1. **我们自己抛的** `Cancelled` —— 循环在轮边界/工具之间查出来的。
+ *    用 instanceof 判，不比字符串 —— 那会把 `new Error('已取消')` 误判。
+ *
+ * 2. **fetch 被 abort 抛的** `AbortError` —— signal 生效时由 undici/SDK 抛，
+ *    我们碰不到那个类，只能认 `name`。它是 DOMException 而不是我们的类，
+ *    所以 instanceof 那条永远漏掉它。
+ *
+ *    不认它的后果是整条修复白做：signal 成功中断了请求（好事），但抛出的
+ *    错误被判成「真故障」，走 emit.error —— 用户点停止，屏幕上出现一条红色
+ *    「出错了」。他会以为自己弄坏了什么，而这本来就是他要的结果。
+ *
+ *    只认 `name === 'AbortError'` 这个精确值，不做模糊匹配：这是 WHATWG
+ *    规定的名字，不是我们随便挑的字符串。
  */
 export function isCancelled(err: unknown): boolean {
   // 自引用的 cause 会让遍历死循环（测试里有这条），用 seen 兜住
@@ -144,6 +190,8 @@ export function isCancelled(err: unknown): boolean {
   let cur = err
   while (cur !== null && cur !== undefined && !seen.has(cur)) {
     if (cur instanceof Cancelled) return true
+    // AbortError：fetch 被 signal 中断时抛的。见上面第 2 点。
+    if ((cur as { name?: string })?.name === 'AbortError') return true
     seen.add(cur)
     cur = cur instanceof Error ? cur.cause : undefined
   }
@@ -168,6 +216,20 @@ export function isCancelled(err: unknown): boolean {
 export function withCancel(inner: CallModel, token: CancelToken): CallModel {
   return async (messages) => {
     token.throwIfCancelled()
-    return inner(messages)
+    // ## 光有上面那个前置检查是不够的
+    //
+    // 那一句只能拦住「还没开始的请求」。真正的问题是**已经在飞的**那次
+    // 请求：流式回答的绝大部分时间都花在等它，而它在 SDK/undici 里面，
+    // 我们的循环没有执行权 —— 用户点停止，令牌置位了，那次请求照样跑到底。
+    // 这就是「点停止无效」的根因。
+    //
+    // 把令牌接成 AbortSignal 传下去，SDK 会一路交给 fetch，
+    // 于是取消能真正中断它。
+    //
+    // 注意 signal 每次调用都新建一个：CallModel 可能被重试层调用多次
+    // （withRetry），而 AbortSignal 一旦 aborted 就永久有效 —— 复用一个的话
+    // 第一次取消之后这个 callModel 就永久不可用了。令牌本身是一次性的
+    // （每轮新建），所以「新建的 signal 立刻反映当下的取消状态」是对的。
+    return inner(messages, token.signal())
   }
 }

@@ -23,7 +23,7 @@ export interface McpToolClient {
   callTool(args: {
     name: string
     arguments: Record<string, unknown>
-  }): Promise<{ content: { type: string; text?: string }[] }>
+  }): Promise<{ content: { type: string; text?: string }[]; isError?: boolean }>
 }
 
 // 封装「已建立的连接」：client 供后续调用，close 供程序退出时优雅断开。
@@ -59,10 +59,12 @@ export async function loadMcpTools(client: McpToolClient): Promise<ToolRegistry>
         const res = await client.callTool({ name: t.name, arguments: args })
         // MCP 响应的 content 是数组（可能含图片等多种类型），这里只取 text 类型拼接，
         // 足以覆盖本项目所有工具的文本输出。
-        return res.content
+        const text = res.content
           .filter((c) => c.type === 'text')
           .map((c) => c.text ?? '')
           .join('\n')
+        if (res.isError) throw new Error(text || `MCP 工具 ${t.name} 执行失败`)
+        return text
       },
     }
   }

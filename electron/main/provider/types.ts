@@ -22,7 +22,7 @@
 // ============================================================================
 
 import type { CancelToken } from '../cancel'
-import type { Config, Message } from '../../../src/types'
+import type { TokenUsage, Config, ContentPart, Message } from '../../../src/types'
 
 /**
  * 一轮对话过程中发生的事。两种 provider 都产出这些。
@@ -31,6 +31,7 @@ import type { Config, Message } from '../../../src/types'
  * runAgent 的钩子转过来。
  */
 export type TurnEvent =
+  | { kind: 'usage'; usage: TokenUsage }
   /** 流式文本增量，逐 token 到达 */
   | { kind: 'delta'; text: string }
   /** 一个工具跑完了 */
@@ -73,7 +74,7 @@ export interface TurnRequest {
   /**
    * 附件（图片、PDF 等）。可选，用于多模态输入。
    */
-  attachments?: any[]
+  attachments?: ContentPart[]
   /**
    * 这一轮属于**哪个会话**（我们自己的会话 id，不是 ACP 那边的）。
    *
