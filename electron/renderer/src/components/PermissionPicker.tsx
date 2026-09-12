@@ -90,7 +90,12 @@ export function PermissionPicker({
         aria-label="权限"
         id={id}
         style={{ margin: 0, top: 'auto', right: 'auto', ...pos }}
-        className="fixed max-h-[320px] min-w-[240px] flex-col overflow-y-auto rounded-card border border-line-strong bg-overlay p-1 text-[12px] shadow-overlay open:flex"
+        // 不写 border：shadow-overlay 的第一层已经是 0 0 0 1px var(--color-line-strong)，
+        // 再加一条 border 就是双层描边。跟右键菜单（ContextMenu）统一，
+        // 边界一律走 ring —— 见 styles.css 文件头第 2 条。
+        // gap-0.5：这三项每项两行（标题 + 一句说明），紧挨着时两项的说明和
+        // 标题会黏成一片，扫不出边界。模型那个浮层每项只有一行，不需要。
+        className="fixed max-h-[320px] min-w-[240px] flex-col gap-0.5 overflow-y-auto rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
       >
         {PERMISSION_MODES.map((mode) => {
           const isCurrent = mode === current

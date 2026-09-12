@@ -87,7 +87,10 @@ describe('ProviderPicker', () => {
     const { container } = render(<ProviderPicker view={view()} onPick={() => {}} />)
     const cls = container.querySelector('[role="listbox"]')!.className
     expect(cls).toMatch(/bg-overlay\b/)
-    expect(cls).toMatch(/border-line-strong/)
+    // 那条 1px 边由 shadow-overlay 的第一层给，不再额外写 border
+    // （两者并存就是双层描边）。跨组件的守卫在 overlay-consistency.test.ts。
+    expect(cls).toMatch(/shadow-overlay\b/)
+    expect(cls).not.toMatch(/\bborder(-|\b)/)
     expect(cls).toMatch(/rounded-card/)
   })
 })

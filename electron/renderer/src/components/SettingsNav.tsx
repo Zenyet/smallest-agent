@@ -1,3 +1,4 @@
+import { SettingsButton } from './settings/SettingsControls'
 // ============================================================================
 // SettingsNav.tsx —— 设置打开时的侧边栏
 // ----------------------------------------------------------------------------
@@ -42,14 +43,14 @@ export function SettingsNav({
 
       {/* 返回：设置是个页面，得有出口。放在顶部而不是底部 ——
           「返回」是导航动作，和下面的分区列表是同一层级的东西。 */}
-      <button
+      <SettingsButton
         type="button"
         onClick={onClose}
         className="flex h-7 flex-none cursor-pointer items-center gap-1.5 rounded-control border-none bg-transparent px-2 text-left text-[12.5px] text-ink-2 transition-[color,background-color] duration-150 hover:bg-hover hover:text-ink"
       >
         <Icon name="back" size={13} strokeWidth={1.8} />
         <span className="flex-1">返回对话</span>
-      </button>
+      </SettingsButton>
 
       {/* 组头。和 SessionList 里「项目」那条同一个规格（h-6 / 11px /
           semibold / ink-3），两栏切换时这一行不该跳。 */}
@@ -57,11 +58,11 @@ export function SettingsNav({
         <span className="text-[11px] font-semibold tracking-wide text-ink-3">设置</span>
       </div>
 
-      <nav className="flex flex-1 flex-col gap-px overflow-y-auto">
+      <nav aria-label="设置分类" className="flex flex-1 flex-col gap-1 overflow-y-auto">
         {SECTIONS.map((section) => {
           const isActive = section.id === active
           return (
-            <button
+            <SettingsButton
               key={section.id}
               type="button"
               aria-current={isActive ? 'page' : undefined}
@@ -72,7 +73,7 @@ export function SettingsNav({
               //
               // 底用 hover-2 而不是 surface —— surface 压在 canvas 上只差一点，
               // 扫一眼看不出自己在哪页（gpui 侧改过同一处）。
-              className={`flex h-7 flex-none cursor-pointer items-center gap-1.5 rounded-control border-none px-2 text-left text-[12.5px] transition-[color,background-color] duration-150 ${
+              className={`flex h-10 flex-none cursor-pointer items-center gap-2.5 rounded-control border-none px-3 text-left text-[13px] transition-[color,background-color] duration-150 ${
                 isActive
                   ? 'bg-hover-2 font-medium text-ink'
                   : 'bg-transparent text-ink-2 hover:bg-hover hover:text-ink'
@@ -80,7 +81,7 @@ export function SettingsNav({
             >
               <Icon name={section.icon} size={13} strokeWidth={1.8} />
               <span className="flex-1 truncate">{section.label}</span>
-            </button>
+            </SettingsButton>
           )
         })}
       </nav>

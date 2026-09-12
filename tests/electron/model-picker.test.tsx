@@ -165,12 +165,15 @@ describe('ModelPicker', () => {
     expect(screen.getByText(/去设置里填一把 API Key/)).toBeTruthy()
   })
 
-  // 浮层规格和右键菜单同一套 —— 应用里所有浮层是一个语言
-  it('浮层用和右键菜单同一套外观（overlay 底 + line_strong 边 + card 圆角）', () => {
+  // 浮层规格和右键菜单同一套 —— 应用里所有浮层是一个语言。
+  // 那条 1px 边由 shadow-overlay 的第一层给，不再额外写 border
+  // （两者并存就是双层描边）。ContextMenu 那边有同样一条断言。
+  it('浮层用和右键菜单同一套外观（overlay 底 + card 圆角 + 单层 ring）', () => {
     render(<ModelPicker {...props} />)
     const cls = panel().className
     expect(cls).toMatch(/bg-overlay\b/)
-    expect(cls).toMatch(/border-line-strong/)
     expect(cls).toMatch(/rounded-card/)
+    expect(cls).toMatch(/shadow-overlay\b/)
+    expect(cls).not.toMatch(/\bborder(-|\b)/)
   })
 })

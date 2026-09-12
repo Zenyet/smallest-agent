@@ -18,6 +18,7 @@ import {
   providerOptions,
   resolveLaunch,
   splitVendorModel,
+  toggleProvider,
   toPermissionMode,
   type ProvidersState,
 } from '../../electron/main/providers'
@@ -215,6 +216,51 @@ describe('normalizeProvidersState', () => {
     expect(out.sessionPermission).toEqual({ s1: 'readonly', s3: 'auto' })
   })
 
+  // ## 旧格式迁移
+  //
+  // 老配置里 disabled 挂在每个 external 上，新格式是顶层黑名单。
+  // 不迁移的话，已经在用的人升级后五家会突然全部冒出来 —— 而他可能特意
+  // 留着 disabled（装了但不想在这个 app 里用）。那是「升级悄悄改了我的配置」。
+  it('把旧的 disabled: true 迁移进 disabledProviders', () => {
+    const out = normalizeProvidersState({
+      external: [
+        { id: 'a', name: 'A', command: 'x' },
+        { id: 'b', name: 'B', command: 'x', disabled: true },
+      ],
+    })
+    expect(out.disabledProviders).toEqual(['b'])
+    // 迁移完不再写回 external —— 留一份的话用户想启用得改两个地方，
+    // 而他只看得到一个
+    expect(out.external.some((e) => e.disabled)).toBe(false)
+  })
+
+  it('迁移是幂等的（迁完再 normalize 一次结果不变）', () => {
+    const once = normalizeProvidersState({
+      external: [{ id: 'b', name: 'B', command: 'x', disabled: true }],
+    })
+    expect(normalizeProvidersState(once)).toEqual(once)
+  })
+
+  it('两个来源合并，不互相覆盖', () => {
+    const out = normalizeProvidersState({
+      external: [
+        { id: 'a', name: 'A', command: 'x' },
+        { id: 'b', name: 'B', command: 'x', disabled: true },
+      ],
+      disabledProviders: ['a'],
+    })
+    expect([...out.disabledProviders].sort()).toEqual(['a', 'b'])
+  })
+
+  // 黑名单里留着已删 provider 的 id 没意义，而且会随每次写盘一直堆积
+  it('黑名单里认不出的 id 清掉', () => {
+    const out = normalizeProvidersState({
+      external: [{ id: 'a', name: 'A', command: 'x' }],
+      disabledProviders: ['a', '已经删了的', ''],
+    })
+    expect(out.disabledProviders).toEqual(['a'])
+  })
+
   it('defaultProvider 指向不存在的就丢掉', () => {
     expect(normalizeProvidersState({ defaultProvider: '不存在' }).defaultProvider).toBeUndefined()
     expect(normalizeProvidersState({ defaultProvider: BUILTIN_ID }).defaultProvider).toBe(BUILTIN_ID)
@@ -319,15 +365,32 @@ describe('providerOptions', () => {
     expect(opts.slice(1).every((o) => o.external)).toBe(true)
   })
 
-  // disabled 的要 npx 拉包 + 各自认证，不该在用户没看过配置时就出现
-  it('disabled 的不出现在选择器里', () => {
+  // 默认全部可选 —— 这是和原来相反的默认值（原来模板里全带 disabled: true，
+  // 结果用户以为功能不存在）。见 providers.ts 里 disabledProviders 的注释。
+  it('默认（黑名单为空）时配好的 CLI 全部可选', () => {
+    const s = state({
+      external: [
+        { id: 'a', name: 'A', command: 'x' },
+        { id: 'b', name: 'B', command: 'x' },
+      ],
+    })
+    expect(providerOptions(s).map((o) => o.id)).toEqual([BUILTIN_ID, 'a', 'b'])
+  })
+
+  it('黑名单里的不出现在选择器里', () => {
     const s = state({
       external: [
         { id: 'on', name: '开着', command: 'x' },
-        { id: 'off', name: '关着', command: 'x', disabled: true },
+        { id: 'off', name: '关着', command: 'x' },
       ],
+      disabledProviders: ['off'],
     })
     expect(providerOptions(s).map((o) => o.id)).toEqual([BUILTIN_ID, 'on'])
+  })
+
+  it('内置 agent 不受黑名单影响（那是「至少有一个能用」的保底）', () => {
+    const s = state({ external: [], disabledProviders: [BUILTIN_ID] })
+    expect(providerOptions(s).map((o) => o.id)).toEqual([BUILTIN_ID])
   })
 })
 
@@ -478,13 +541,62 @@ describe('forgetSession', () => {
   })
 })
 
+describe('toggleProvider', () => {
+  it('停用：进黑名单，选择器里消失', () => {
+    const out = toggleProvider(state(), 'pi', false)
+    expect(out.disabledProviders).toEqual(['pi'])
+    expect(providerOptions(out).map((o) => o.id)).toEqual([BUILTIN_ID, 'claude-code'])
+  })
+
+  it('启用：出黑名单，选择器里回来', () => {
+    const off = toggleProvider(state(), 'pi', false)
+    const on = toggleProvider(off, 'pi', true)
+    expect(on.disabledProviders).toEqual([])
+    expect(providerOptions(on).map((o) => o.id)).toEqual([BUILTIN_ID, 'claude-code', 'pi'])
+  })
+
+  it('幂等：重复停用不会塞两份', () => {
+    const once = toggleProvider(state(), 'pi', false)
+    expect(toggleProvider(once, 'pi', false).disabledProviders).toEqual(['pi'])
+  })
+
+  // 停掉内置之后选择器会是空的，用户没法把会话切回任何东西
+  it('拒绝停用内置 agent，原样返回', () => {
+    const s = state()
+    expect(toggleProvider(s, BUILTIN_ID, false)).toBe(s)
+  })
+
+  it('认不出的 id 原样返回，不往黑名单里塞垃圾', () => {
+    const s = state()
+    expect(toggleProvider(s, '不存在的', false)).toBe(s)
+  })
+
+  // 黑名单不动会话绑定：停用当前正在用的那家时，已有绑定还在（normalize 不清它），
+  // 只是选择器里选不到了 —— 用户下次切换只能选别的
+  it('停用当前正在用的那家，不清掉已有绑定', () => {
+    const s = state({ sessionProvider: { s1: 'pi' } })
+    const out = toggleProvider(s, 'pi', false)
+    expect(out.sessionProvider).toEqual({ s1: 'pi' })
+    expect(providerFor(out, 's1')).toBe('pi')
+  })
+})
+
 describe('exampleProvidersState（模板）', () => {
-  // 它们要 npx 拉包（首次几十秒）且要各自的认证，不该在用户没看过配置的
-  // 情况下就出现在选择器里
-  it('预置的五家全是 disabled，选择器里只剩内置', () => {
+  // 默认全部可用：装了 Claude Code / Codex 的人开箱就能在对话框左下角选到，
+  // 不用先去手改 JSON。原来五家全带 disabled: true，结果是用户以为功能不存在
+  // （用户原话：「首页的对话框为啥只有一个 agent 模式的」）。
+  it('预置的五家默认全部可选，不再是 disabled', () => {
     const s = exampleProvidersState()
-    expect(s.external.every((e) => e.disabled)).toBe(true)
-    expect(providerOptions(s).map((o) => o.id)).toEqual([BUILTIN_ID])
+    expect(s.external.some((e) => e.disabled)).toBe(false)
+    expect(s.disabledProviders).toEqual([])
+    expect(providerOptions(s).map((o) => o.id)).toEqual([
+      BUILTIN_ID,
+      'claude-code',
+      'codex',
+      'gemini',
+      'pi',
+      'deepseek-harness',
+    ])
   })
 
   it('五家都在，且 Kimi 不在（npm 上没有它的 ACP 桥）', () => {

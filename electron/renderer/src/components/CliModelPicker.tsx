@@ -88,7 +88,9 @@ export function CliModelPicker({
         aria-label="模型"
         id={id}
         style={{ margin: 0, top: 'auto', right: 'auto', ...pos }}
-        className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card border border-line-strong bg-overlay p-1 text-[12px] shadow-overlay open:flex"
+        // 不写 border：shadow-overlay 的第一层已经是 0 0 0 1px var(--color-line-strong)，
+        // 再加一条 border 就是双层描边。四个选择器 + 右键菜单共用这一套外观。
+        className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
       >
         {view.models.map((m) => {
           const isCurrent = m.id === view.currentModel

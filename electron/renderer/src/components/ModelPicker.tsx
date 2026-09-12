@@ -135,7 +135,10 @@ export function ModelPicker({
         style={{ margin: 0, top: 'auto', right: 'auto', ...pos }}
         // 规格和右键菜单同一套（overlay 底 + line_strong 边 + card 圆角），
         // 这样应用里所有浮层是一个语言。
-        className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card border border-line-strong bg-overlay p-1 text-[12px] shadow-overlay open:flex"
+        // 不写 border：shadow-overlay 的第一层已经是 0 0 0 1px var(--color-line-strong)，
+        // 再加一条 border 就是双层描边。跟右键菜单（ContextMenu）统一，
+        // 边界一律走 ring —— 见 styles.css 文件头第 2 条。
+        className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
       >
         {catalog.map((entry, gi) => (
           <div key={entry.id} className="contents">
