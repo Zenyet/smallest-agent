@@ -18,6 +18,8 @@
 
 桌面版的架构说明见 [`electron/README.md`](electron/README.md)。
 
+桌面版现已支持从新对话启动只读的「理解项目」任务，查看文件依据、采用成果并导出 Markdown；附件会随消息发送并保存在历史中，知识库按需初始化。使用方式与当前边界见 [第一阶段交付说明](docs/product/2026-09-09-phase-one.md)。
+
 ## 快速开始
 
 ```bash
@@ -31,7 +33,7 @@ pnpm dev "北京天气怎么样"
 pnpm dev:electron
 
 # 测试
-pnpm test              # 293 个测试（CLI + 桌面版）
+pnpm test              # CLI + 桌面版测试
 ```
 
 > **桌面版第一次跑报 `Error: Electron uninstall`？** pnpm 默认不执行依赖的

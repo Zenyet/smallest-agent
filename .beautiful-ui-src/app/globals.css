@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+:root {
+  --canvas: #f1f2f3;
+  --surface: #ffffff;
+  --field: #f2f2f3;
+  --ink: #1a1b1d;
+  --ink-muted: #6b6e73;
+  --ink-faint: #9a9da3;
+  --line: #e3e4e6;
+  --accent: #0285ff;
+  --accent-ink: #0170dd;
+  --accent-tint: #e9f3ff;
+  --green: #189a4d;
+  --green-tint: #e8f5ed;
+  --red: #d92d20;
+  --red-tint: #fdecea;
+  --amber: #b45309;
+  --amber-tint: #fdf3e3;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --canvas: #1c1d1f;
+    --surface: #242527;
+    --field: #2b2c2f;
+    --ink: #f0f1f2;
+    --ink-muted: #a2a5aa;
+    --ink-faint: #74777d;
+    --line: #35373a;
+    --accent: #3d9aff;
+    --accent-ink: #7ec0ff;
+    --accent-tint: #3d9aff29;
+    --green: #3dbb72;
+    --green-tint: #3dbb7224;
+    --red: #f97066;
+    --red-tint: #f9706624;
+    --amber: #f5a623;
+    --amber-tint: #f5a62324;
+  }
+}
+
+@theme inline {
+  --color-canvas: var(--canvas);
+  --color-surface: var(--surface);
+  --color-field: var(--field);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-line: var(--line);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-tint: var(--accent-tint);
+  --color-green: var(--green);
+  --color-green-tint: var(--green-tint);
+  --color-red: var(--red);
+  --color-red-tint: var(--red-tint);
+  --color-amber: var(--amber);
+  --color-amber-tint: var(--amber-tint);
+  --font-sans: var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-mono), ui-monospace, monospace;
+  --ease-link: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-out-strong: cubic-bezier(0.23, 1, 0.32, 1);
+}
