@@ -98,14 +98,21 @@ describe('ContextMenu', () => {
   })
 
   // 容器规格照 context_menu.rs：overlay 底 + line_strong 1px 边 + card 圆角
-  it('容器用浮层配色和 card 圆角', () => {
+  //
+  // 那条 1px 边由 shadow-overlay 的第一层给（0 0 0 1px var(--color-line-strong)），
+  // 不再额外写 border —— 两者并存就是双层描边，看起来像 outline 套着 border。
+  // 边界统一走 ring 是这套设计系统的约定，见 styles.css 文件头第 2 条。
+  it('容器用浮层配色和 card 圆角，且只有一层描边', () => {
     const { container } = render(
       <ContextMenu state={{ at, items: [{ label: 'a', onSelect: () => {} }] }} onClose={() => {}} />,
     )
     const panel = container.querySelector('[role="menu"]')!
     expect(panel.className).toMatch(/bg-overlay\b/)
-    expect(panel.className).toMatch(/border-line-strong/)
     expect(panel.className).toMatch(/rounded-card/)
+    // 描边来自 ring
+    expect(panel.className).toMatch(/shadow-overlay\b/)
+    // 不许再有第二层：border-* 会和上面那条 ring 叠成双线
+    expect(panel.className).not.toMatch(/\bborder(-|\b)/)
   })
 
   it('菜单钉在光标位置', () => {

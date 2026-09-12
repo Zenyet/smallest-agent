@@ -16,9 +16,18 @@ function formatElapsed(ms: number): string {
 export function ToolCallGroup({
   events,
   elapsedMs,
+  live = false,
 }: {
   events: ToolCallEvent[]
   elapsedMs?: number
+  /**
+   * 这一组正在进行中（模型还在调工具，答案还没开始写）。
+   *
+   * 为 true 时头部换成「正在调用 X」+ 转动的星芒 —— 这条实时信息原来由
+   * 底部一个独立的 ThinkingState 显示，那等于把同一份 tools 渲染两遍
+   * （气泡里一份 chip，底部一份实时行）。合并到 chip 上之后只剩一处。
+   */
+  live?: boolean
 }) {
   const [open, setOpen] = useState(false)
   if (events.length === 0) return null
@@ -37,12 +46,25 @@ export function ToolCallGroup({
         onClick={() => setOpen(!open)}
         aria-expanded={open}
       >
-        <span className={hasFailed ? 'text-red' : 'text-ink-3'}>
-          <Icon name={hasFailed ? 'warn' : 'tool'} size={12} />
+        {/* 进行中优先于失败态：这一组还没跑完，failed 计数不是最终结论 */}
+        <span className={live ? 'text-accent' : hasFailed ? 'text-red' : 'text-ink-3'}>
+          <Icon
+            name={live ? 'think' : hasFailed ? 'warn' : 'tool'}
+            size={12}
+            className={live ? 'animate-spin-slow' : undefined}
+          />
         </span>
         <span>
-          本轮 {events.length} 次工具调用
-          {elapsedMs !== undefined && <> · {formatElapsed(elapsedMs)}</>}
+          {live ? (
+            // 点名当前这个工具，而不是只说「正在调用工具」——
+            // fetch_url 跑得久的时候，用户想知道卡在哪一步
+            `正在调用 ${events[events.length - 1].toolName}`
+          ) : (
+            <>
+              本轮 {events.length} 次工具调用
+              {elapsedMs !== undefined && <> · {formatElapsed(elapsedMs)}</>}
+            </>
+          )}
         </span>
         {hasFailed && (
           <span className="font-mono text-[11px] tabular-nums text-red">

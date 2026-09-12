@@ -70,7 +70,14 @@ export function hydrateMessages(history: Message[], sessionId: string): ChatMess
     if (m.role === 'user') {
       // 用户消息前先把没归属的工具落地，否则它们会跨到下一轮对话里去
       flush()
-      out.push({ role: 'user', content: m.content, tools: [], streaming: false })
+      out.push({
+        role: 'user',
+        content: m.content,
+        ...(m.contentParts?.length ? { contentParts: m.contentParts } : {}),
+        tools: [],
+        streaming: false,
+        timestamp: m.timestamp,
+      })
       continue
     }
 
@@ -89,6 +96,7 @@ export function hydrateMessages(history: Message[], sessionId: string): ChatMess
           content: m.content,
           tools: pending,
           streaming: false,
+          timestamp: m.timestamp,
         })
         pending = []
       }
@@ -116,5 +124,26 @@ export function hydrateMessages(history: Message[], sessionId: string): ChatMess
 
   // 收尾：最后一轮只有工具没有正文（被中断、或者存盘时正好在那个点）
   flush()
+  // Attribute all model calls between user messages to the final visible reply.
+  let records: NonNullable<ChatMessage['usages']> = []
+  let userIndex = -1
+  const attach = () => {
+    const nextUser = out.findIndex((m, i) => i > userIndex && m.role === 'user')
+    const end = nextUser < 0 ? out.length : nextUser
+    for (let i = end - 1; i > userIndex; i--) if (out[i].role === 'assistant') {
+      if (records.length) out[i].usages = records
+      break
+    }
+    userIndex = nextUser
+    records = []
+  }
+  // Start at the first user, and consume exactly one visible user per stored user.
+  userIndex = out.findIndex(m => m.role === 'user')
+  let seenUser = false
+  for (const m of history) {
+    if (m.role === 'user') { if (seenUser) attach(); seenUser = true }
+    if (m.role === 'assistant') records.push(...(m.usages ?? (m.usage ? [m.usage] : [])))
+  }
+  if (seenUser) attach()
   return out
 }

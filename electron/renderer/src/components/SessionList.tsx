@@ -24,10 +24,19 @@ export function SessionList({
   renamingId,
   onRename,
   onCancelRename,
+  runningIds,
 }: {
   /** 已经按项目分好组的会话（分组逻辑在 main/projects.ts 的 groupSessions 里，可单测） */
   groups: SessionGroup[]
   currentId: string | null
+  /**
+   * 哪些会话正在跑。行尾显示一个转动的指示。
+   *
+   * 会话可以并发（锁按会话，见 agent-runner.ts），所以这是个集合而不是
+   * 一个 id —— 用户在 A 会话提问、切到 B 会话继续问，两边都在跑。
+   * 只标记当前打开的那个会等于告诉他「另一个已经好了」。
+   */
+  runningIds: ReadonlySet<string>
   /** 当前选中的项目：新会话会落在它下面，行上也要有选中态 */
   currentProjectId: string | null
   onSelect: (id: string) => void
@@ -199,6 +208,17 @@ export function SessionList({
                         }}
                       >
                         <span className="flex-1 truncate">{s.title}</span>
+                        {/* 正在跑的指示。放行尾而不是标题前面：标题左边是
+                            视线落点，塞个图标会把所有标题往右推一格、
+                            让没在跑的行看起来缩进不齐。 */}
+                        {runningIds.has(s.id) && (
+                          // aria-label 挂在 span 上而不是 Icon 上：Icon 的 svg
+                          // 写死了 aria-hidden（它是装饰性的，语义由旁边的东西
+                          // 承担），传给它的 aria-label 会被吞掉。
+                          <span className="shrink-0 text-accent" aria-label="正在处理">
+                            <Icon name="think" size={11} className="animate-spin-slow" />
+                          </span>
+                        )}
                       </li>
                     )
                   })}

@@ -1,4 +1,6 @@
-import { useLayoutEffect, useRef, useState } from 'react'
+import { TurnUsage } from './TokenUsage'
+import { AttachmentStrip } from './AttachmentPicker'
+import { memo, useLayoutEffect, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import { Icon } from './Icon'
 import { ToolCallGroup } from './ToolCallGroup'
@@ -18,7 +20,9 @@ const ALIGN = {
 
 const SKIN = {
   user: 'bubble--user bg-field shadow-hairline',
-  assistant: 'bubble--assistant bg-surface shadow-card',
+  // 助手气泡去掉背景色：它的内容已经通过字体和间距自成一体，
+  // 一块 surface 底色在深色背景上反而像贴了一张卡片，视觉层级混乱。
+  assistant: 'bubble--assistant',
 } as const
 
 // 按 turn 分组，同一轮的工具调用压成一个 ToolCallGroup 摘要行，而不是逐个平铺。
@@ -40,7 +44,34 @@ function groupByTurn(tools: ToolCallEvent[]): ToolCallEvent[][] {
   return order.map((turn) => byTurn.get(turn)!)
 }
 
-// 气泡**下面**那条悬浮操作栏：复制（+ 用户消息的编辑）。
+// 行内显示：按「离现在多远」决定给到哪一级精度。
+//
+//   今天      14:32           日期是多余的 —— 用户知道今天是哪天
+//   今年      9月2日 14:32     补到日
+//   往年      2025/9/2 14:32   补到年
+//
+// 不带秒：气泡里秒级精度没有意义，而且会让这串比旁边两个按钮还宽。
+// 需要精确到秒的场合走下面 fullTs 的 title 提示。
+function formatTs(ts: number): string {
+  const d = new Date(ts)
+  const now = new Date()
+  const hm = `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`
+  if (d.toDateString() === now.toDateString()) return hm
+  if (d.getFullYear() === now.getFullYear()) return `${d.getMonth() + 1}月${d.getDate()}日 ${hm}`
+  return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${hm}`
+}
+
+// 悬停提示里的完整时刻：年月日 + 时分秒 + 星期。
+// 行内那串为了不喧宾夺主省掉了日期/秒，这里补齐 —— 「这条到底是哪天说的」
+// 是排查对话时真会问的问题，而省略的信息总得有个地方能拿回来。
+function fullTs(ts: number): string {
+  const d = new Date(ts)
+  const p2 = (n: number) => n.toString().padStart(2, '0')
+  const week = '日一二三四五六'[d.getDay()]
+  return `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 周${week} ${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+}
+
+// 气泡**下面**那条悬浮操作栏：复制（+ 用户消息的编辑）+ 时间戳。
 //
 // ## 为什么在气泡外面
 //
@@ -79,11 +110,32 @@ function MessageActions({
   }
 
   return (
+    // w-full + justify-end：两侧的操作栏都贴各自气泡的**右边缘**。
+    //
+    // 助手侧原来是默认的左对齐。w-full 是必须的 —— 外层 wrapper 是
+    // `items-start`，不给宽度的话这一行会收缩到内容宽度、贴在左边，
+    // 光加 justify-end 没有任何效果（没有多余空间可分配）。
+    //
+    // mt 两侧不同：用户气泡有 bg-field 底色，操作栏紧贴着那个色块下沿会显得挤，
+    // 给到 6px；助手气泡现在没有背景，2px 就够，再多会让它和正文脱开。
     <div
-      className={`mt-0.5 flex h-[18px] items-center gap-0.5 opacity-0 transition-opacity duration-100 group-hover:opacity-100 ${
-        message.role === 'user' ? 'justify-end' : ''
+      className={`flex h-[18px] w-full items-center justify-end gap-0.5 opacity-0 transition-opacity duration-100 group-hover:opacity-100 ${
+        message.role === 'user' ? 'mt-1.5' : 'mt-0.5'
       }`}
     >
+      {/* 时间戳。没有 timestamp 就不渲染 —— 那是**旧会话文件**里的消息，
+          我们确实不知道它们发生在什么时候（见 types.ts 里那个字段的注释），
+          留空比编一个时刻诚实。
+          用户侧靠右（父容器 justify-end），助手侧靠左（flex 默认顺序）。 */}
+      {message.timestamp && (
+        <span
+          className="px-0.5 text-[11px] text-ink-3 tabular-nums"
+          title={fullTs(message.timestamp)}
+        >
+          {formatTs(message.timestamp)}
+        </span>
+      )}
+
       <button
         type="button"
         aria-label={copied ? '已复制' : '复制'}
@@ -209,19 +261,51 @@ function EditForm({
   )
 }
 
-export function MessageBubble({
+/**
+ * 一个消息气泡。
+ *
+ * ## 为什么包了 memo
+ *
+ * 用户在输入框每敲一个字，ChatWindow 就重渲染一次（textarea 是受控的，
+ * `value={text}` 那份 state 必须在那一层）。不 memo 的话几十个气泡跟着
+ * 重渲染 —— 而它们的内容跟输入框里的字毫无关系。长会话下这是打字延迟的
+ * 主要来源。
+ *
+ * memo 生效有个前提：props 必须稳定。所以 onEditResend 的签名改成了
+ * `(index, text)` + 一个 useCallback 稳住的引用 —— 原来那里是
+ * `(text) => onEditResend(start + i, text)`，每次渲染新建一个闭包，
+ * memo 每次都会判定「props 变了」，等于没包。
+ */
+export const MessageBubble = memo(function MessageBubble({
   message,
+  index = 0,
   onEditResend,
   canEdit = false,
+  live = false,
 }: {
   message: ChatMessage
   /**
-   * 编辑重发：把这条消息换成新内容，砍掉它之后的历史，重新提问。
-   * 不传就没有编辑入口（只读场景）。
+   * 这条消息在完整 messages 里的下标。编辑重发要用它定位截断点。
+   * 只读场景（没有 onEditResend）用不到，所以可选。
    */
-  onEditResend?: (text: string) => void
+  index?: number
+  /**
+   * 编辑重发：把第 index 条消息换成新内容，砍掉它之后的历史，重新提问。
+   * 不传就没有编辑入口（只读场景）。
+   *
+   * 收 index 而不是让调用方闭包捕获它：那样每个气泡每次渲染都会拿到一个
+   * 新函数，把 memo 破掉（见上面）。
+   */
+  onEditResend?: (index: number, text: string) => void
   /** 正在跑的时候不许编辑：那一轮还在往 messages 里写，之后的截断会和它打架 */
   canEdit?: boolean
+  /**
+   * 这条消息的**最后一组**工具调用正在进行中。
+   *
+   * 只给最后一组：前面几组已经跑完了，它们的 turn 早就结束。
+   * 由 ChatWindow 判断（它才知道 running 和「谁是最后一条」）。
+   */
+  live?: boolean
 }) {
   const groups = groupByTurn(message.tools)
   // 有工具卡片就定宽 —— 它们展开/折叠会改变内容宽度，见下面 wrapper 的注释
@@ -251,10 +335,16 @@ export function MessageBubble({
       className={`group flex ${hasTools ? 'w-[76%]' : 'w-fit'} max-w-[76%] min-w-0 flex-col ${ALIGN[message.role]}`}
     >
       <div className={`bubble ${SKIN[message.role]} min-w-0 max-w-full rounded-card px-3 py-2`}>
-        {groups.map((events) => (
+        {message.contentParts && <AttachmentStrip attachments={message.contentParts} />}
+        {groups.map((events, gi) => (
           // 同一轮内所有工具调用共享一个 elapsedMs（agent-runner 按轮测量，见那边的注释），
           // 取第一条就是这一组的耗时。
-          <ToolCallGroup key={events[0].turn} events={events} elapsedMs={events[0].elapsedMs} />
+          <ToolCallGroup
+            key={events[0].turn}
+            events={events}
+            elapsedMs={events[0].elapsedMs}
+            live={live && gi === groups.length - 1}
+          />
         ))}
 
         {editing && onEditResend ? (
@@ -263,7 +353,7 @@ export function MessageBubble({
             onCancel={() => setEditing(false)}
             onSubmit={(text) => {
               setEditing(false)
-              onEditResend(text)
+              onEditResend(index, text)
             }}
           />
         ) : (
@@ -282,6 +372,7 @@ export function MessageBubble({
             {/* 徽章行**有徽章才渲染**。原来是无条件的，于是绝大多数消息
                 （既没缓存命中也没核查结论）在正文下面挂着一个带 mt-1.5 的
                 空 flex 盒子 —— 那是「气泡底部空一块」的另一半原因。 */}
+            <TurnUsage records={message.usages} />
             {(message.cacheHit || message.verdict) && (
               <div className="bubble__badges mt-1.5 flex flex-wrap items-center gap-1.5">
                 {message.cacheHit && (
@@ -322,4 +413,4 @@ export function MessageBubble({
       )}
     </div>
   )
-}
+})

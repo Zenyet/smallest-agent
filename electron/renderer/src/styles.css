@@ -120,6 +120,14 @@
     scrollbar-color: var(--color-line) transparent;
   }
 
+  /* Reserve the vertical scrollbar lane before content overflows. Keep this on
+     scroll containers, not every element: overflow-hidden cards must not gain
+     an empty gutter. Shared overflow utilities also cover new lists and menus;
+     textareas keep the same text width when autosizing switches hidden to auto. */
+  :where(.overflow-y-auto, .overflow-auto, .st-scroll, .st-select-menu, textarea) {
+    scrollbar-gutter: stable;
+  }
+
   *::-webkit-scrollbar {
     width: 9px;
     height: 9px;
@@ -150,6 +158,63 @@
     display: none;
     width: 0;
     height: 0;
+  }
+
+  /* --- 焦点框 ---
+   *
+   * 问题：Chromium 默认那圈焦点环（亮蓝/白、方角、贴着元素外沿）在这套
+   * 近黑的深色 UI 上非常扎眼，Tab 一路按下去每个盒子都炸一下。
+   *
+   * ## 为什么不是 `*:focus { outline: none }`
+   *
+   * 那样键盘用户会**完全看不见自己在哪**。这个 app 里 Tab 是有实际用途的：
+   * 输入框 ↔ 发送键、设置页几十个字段之间的移动，全靠它。
+   *
+   * ## 用 :focus-visible 而不是 :focus
+   *
+   * 两者的差别正是用户抱怨的那一半：`:focus` 在**鼠标点击**后也会亮，
+   * 而 `:focus-visible` 只在浏览器判定「这次是键盘操作」时才匹配 ——
+   * 点一下按钮不会留下一个框，Tab 过去才有。
+   *
+   * 于是这里做两件事：把非键盘路径的默认环彻底关掉，
+   * 键盘路径换成这套系统自己的 accent 细环（跟输入框聚焦态同一个语言：
+   * 2px、内偏移 1px、跟随元素圆角）。
+   *
+   * 想连键盘态也一并去掉的话，把下面第二条规则整个删掉即可 ——
+   * 代价见上面第一段。 */
+  /* 第一步：把**所有**默认焦点环关掉，包括 UA 自己在 :focus-visible 下画的那个。
+     只写 `:not(:focus-visible)` 是不够的 —— 那样没被下面白名单覆盖的元素
+     会退回 UA 的环，而那正是右键菜单容器上那圈蓝环的来源。 */
+  *:focus {
+    outline: none;
+  }
+
+  /* 第二步：只给**用户真能导航到**的元素画环。
+   *
+   * ## 为什么是白名单，而不是 `*:focus-visible`
+   *
+   * 通配会命中一类不该有环的元素：**程序化聚焦的容器**。
+   * 右键菜单就是活例子 —— 它是 `tabIndex={-1}` + 主动 `.focus()`（为了接 Esc），
+   * 用户根本 Tab 不到它，但 Chromium 对程序化聚焦也会判定成 :focus-visible，
+   * 于是菜单外面套了一圈蓝环，看着像多了一条 border。
+   * 弹窗/对话框/抽屉将来都是这个模式，逐个打补丁必然漏。
+   *
+   * `[tabindex="-1"]` 的语义就是「可聚焦，但不在 Tab 序列里」——
+   * 正好等价于「不是导航目标」，所以按它排除是结构性的，不是特例。 */
+  a:focus-visible,
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  summary:focus-visible,
+  [contenteditable]:focus-visible,
+  [tabindex]:not([tabindex="-1"]):focus-visible {
+    outline: 2px solid var(--color-accent);
+    /* 内偏移：环画在元素**里侧**，不会把相邻元素挤开，也不会被父级
+       overflow 裁掉（侧边栏那些行紧贴容器边缘） */
+    outline-offset: -1px;
+    /* 跟随元素自己的圆角，而不是永远方角 */
+    border-radius: inherit;
   }
 
   /* 13px 基准 + font-medium 默认字重，抄自那个站的实测用法：
@@ -307,22 +372,259 @@
     @apply flex size-6 shrink-0 items-center justify-center rounded-[6px];
   }
 
-  /* Markdown 渲染出的代码块：用 inset（凹陷）而不是 surface（抬起） */
+  /* ── Markdown 渲染（.bubble__text）──────────────────────────────────────
+   *
+   * ReactMarkdown 生成裸 HTML 元素，拿不到 className，只能后代选择器。
+   * 整套尺度贴着设计系统走：13px 基准、4/8px 节奏、token 颜色、两种圆角。
+   * 助手气泡现在无背景色，所以代码块用 inset（凹陷）而非 surface，
+   * 视觉上形成「文字面 → 嵌入代码块」的层次感。
+   * ─────────────────────────────────────────────────────────────────────── */
+
+  /* 首尾块归零，避免气泡顶/底多余空白 */
+  .bubble__text > :first-child { @apply mt-0; }
+  .bubble__text > :last-child  { @apply mb-0; }
+
+  /* 段落 */
+  .bubble__text p {
+    @apply my-2 leading-relaxed;
+  }
+
+  /* 标题：h1-h3 在对话里出现，h4+ 少见但要能看 */
+  .bubble__text h1,
+  .bubble__text h2,
+  .bubble__text h3 {
+    @apply font-semibold text-ink leading-snug mt-4 mb-1.5;
+  }
+  .bubble__text h1 { @apply text-[15px]; }
+  .bubble__text h2 { @apply text-[14px]; }
+  .bubble__text h3 { @apply text-[13px]; }
+  .bubble__text h4,
+  .bubble__text h5,
+  .bubble__text h6 {
+    @apply font-semibold text-[13px] text-ink-2 mt-3 mb-1;
+  }
+
+  /* 列表：pl 给项目符号/数字留位，item 间距收紧（对话里列表通常很短） */
+  .bubble__text ul,
+  .bubble__text ol {
+    @apply my-2 pl-5;
+  }
+  .bubble__text li { @apply my-0.5 leading-relaxed; }
+  .bubble__text li > ul,
+  .bubble__text li > ol { @apply my-0.5; }
+  .bubble__text ul { list-style-type: disc; }
+  .bubble__text ol { list-style-type: decimal; }
+
+  /* 引用块：左侧 accent 竖线 + 轻微内缩 */
+  .bubble__text blockquote {
+    @apply my-2 pl-3 text-ink-2;
+    border-left: 2px solid var(--color-accent);
+  }
+  .bubble__text blockquote p { @apply my-1; }
+
+  /* 行内代码：inset 底色 + hairline ring，不用 bg-surface 避免和无背景气泡混淆 */
+  .bubble__text code:not(pre > code) {
+    @apply font-mono text-[12px] rounded-chip px-1 py-px;
+    background: var(--color-inset);
+    box-shadow: var(--shadow-hairline);
+    color: var(--color-accent-ink);
+  }
+
+  /* 代码块：inset 底色 + inset-field 阴影，overflow 横向滚动 */
   .bubble__text pre {
-    @apply bg-inset text-ink-2 font-mono overflow-x-auto p-3;
+    @apply font-mono text-[12px] leading-relaxed overflow-x-auto my-2 p-3;
+    background: var(--color-inset);
     border-radius: var(--radius-control);
     box-shadow: var(--shadow-inset-field);
+    color: var(--color-ink-2);
+  }
+  .bubble__text pre > code {
+    /* 代码块里的 code 不加额外样式，由 pre 统一控制 */
+    background: none;
+    box-shadow: none;
+    color: inherit;
+    padding: 0;
+    font-size: inherit;
+    border-radius: 0;
   }
 
-  .bubble__text code {
-    @apply font-mono;
+  /* 分割线：hairline，用 line token，不抢眼 */
+  .bubble__text hr {
+    @apply my-4 border-none;
+    height: 1px;
+    background: var(--color-line);
   }
 
-  .bubble__text > :first-child {
-    @apply mt-0;
+  /* 链接 */
+  .bubble__text a {
+    @apply text-accent-ink underline underline-offset-2 decoration-1;
+    transition: opacity 120ms ease;
   }
+  .bubble__text a:hover { @apply opacity-80; }
 
-  .bubble__text > :last-child {
-    @apply mb-0;
+  /* 表格：sticky 表头，数字列右对齐，hairline 分割线 */
+  .bubble__text table {
+    @apply w-full my-2 text-[12.5px] border-collapse;
   }
+  .bubble__text th {
+    @apply text-left font-semibold text-ink-2 pb-1.5;
+    border-bottom: 1px solid var(--color-line-strong);
+  }
+  .bubble__text td {
+    @apply py-1 pr-3 align-top;
+    border-bottom: 1px solid var(--color-line);
+  }
+  .bubble__text tr:last-child td { border-bottom: none; }
+
+  /* strong / em / del */
+  .bubble__text strong { @apply font-semibold text-ink; }
+  .bubble__text em     { @apply italic; }
+  .bubble__text del    { @apply line-through text-ink-3; }
+  /* ── end bubble__text ─────────────────────────────────────────────────── */
 }
+
+/* Settings: one navigation column; controls share the application's semantic tokens. */
+.st-shell { display:flex; flex:1; flex-direction:column; min-width:0; background:var(--color-canvas); font-size:13px; font-weight:400; }
+.st-scroll { flex:1; min-height:0; overflow:auto; }
+.st-content { width:100%; max-width:760px; margin:auto; padding:32px 30px; }
+.st-page-header { margin-bottom:28px; -webkit-app-region:drag; }
+.st-page-header h2 { font-size:24px; font-weight:500; letter-spacing:-.6px; line-height:1.4; }
+.st-page-header p { margin-top:8px; color:var(--color-ink-2); line-height:1.7; font-size:13px; }
+.settings [hidden] { display:none!important; }
+.st-section-head { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; margin:24px 0 13px; }
+.st-section-head h3 { font-size:14px; font-weight:500; }
+.st-grow { flex:1; min-width:0; }
+.st-hint { color:var(--color-ink-2); font-size:12px; line-height:1.65; display:block; font-weight:400; overflow-wrap:anywhere; }
+.st-hint svg { display:inline-block; }
+.st-stack { display:flex; flex-direction:column; gap:12px; }
+.st-surface { border-radius:10px; background:var(--color-surface); box-shadow:var(--shadow-card); }
+.st-pad { padding:20px; }
+.st-connection-head { display:flex; align-items:center; gap:12px; width:100%; border-radius:10px; background:transparent; padding:16px 18px; text-align:left; }
+.st-connection-head strong,.st-row strong { font-weight:500; }
+.st-connection-body { border-top:1px solid var(--color-line); padding:20px; }
+.st-mark { display:flex; align-items:center; justify-content:center; width:34px; height:34px; flex:none; border-radius:9px; background:var(--color-field); }
+.st-badge { flex:none; border-radius:5px; padding:3px 8px; background:var(--color-field); color:var(--color-ink-2); font-size:11px; line-height:1.5; }
+.st-warn { background:var(--color-orange-tint)!important; color:var(--color-orange)!important; }
+.st-success { background:var(--color-green-tint); color:var(--color-green); }
+.st-danger { background:var(--color-red-tint); color:var(--color-red); }
+.st-success-text { color:var(--color-green); }
+.st-button { display:inline-flex; align-items:center; justify-content:center; gap:7px; background:var(--color-surface); border-radius:8px; padding:5px 10px; min-height:30px; line-height:18px; box-shadow:var(--shadow-btn); font-size:12px; font-weight:500; cursor:pointer; white-space:nowrap; }
+.st-button:hover:not(:disabled),.st-icon-button:hover { background:var(--color-hover); }
+.st-button:disabled { opacity:.45; cursor:default; }
+.st-primary { background:var(--color-ink); color:var(--color-surface); box-shadow:none; }
+.st-primary:hover:not(:disabled) { background:var(--color-ink); opacity:.9; }
+.st-quiet { box-shadow:none; background:transparent; color:var(--color-ink-2); }
+.st-fit { align-self:flex-start; }
+.st-actions { display:flex; align-items:center; flex-wrap:wrap; gap:10px; }
+.st-row { display:flex; align-items:center; gap:16px; padding:14px 0; border-bottom:1px solid var(--color-line); }
+.st-row label,.st-field label { display:block; font-weight:500; margin-bottom:4px; }
+.st-field { display:flex; flex-direction:column; gap:6px; margin-bottom:12px; }
+.st-stack>.st-field { margin-bottom:0; }
+.st-input-line { display:flex; gap:8px; min-width:0; align-items:center; }
+.st-text-input { min-width:0; width:100%; background:var(--color-field); border:1px solid var(--color-line-strong); border-radius:8px; padding:5px 9px; min-height:30px; line-height:18px; font:inherit; color:var(--color-ink); }
+.settings input[aria-invalid=true] { border-color:var(--color-red); }
+.settings input::placeholder { color:var(--color-ink-3); }
+.st-number-row { flex-direction:row; align-items:center; gap:20px; padding:16px 0; border-bottom:1px solid var(--color-line); margin:0; }
+.st-number-control { flex:none; width:110px; }
+.st-switch { appearance:none; position:relative; width:34px; height:20px; flex:none; border-radius:12px; background:var(--color-hover-2); cursor:pointer; }
+.st-switch-thumb { position:absolute; height:14px; width:14px; border-radius:50%; left:3px; top:3px; background:var(--color-ink-2); transition:transform 120ms; }
+.st-switch[aria-checked=true] { background:var(--color-accent); }
+.st-switch[aria-checked=true] .st-switch-thumb { transform:translateX(14px); background:var(--color-ink); }
+.st-switch:disabled { opacity:.5; cursor:default; }
+.st-details { margin-top:20px; border-top:1px solid var(--color-line); padding-top:14px; color:var(--color-ink-2); font-size:12px; }
+
+.st-details p { margin:12px 0; line-height:1.7; }
+.st-details>.st-field:first-of-type { margin-top:16px; }
+.st-details .st-field { color:var(--color-ink); }
+.st-code { font-family:var(--font-mono); font-size:11px; overflow-wrap:anywhere; }
+.st-tabs { display:inline-flex; max-width:100%; gap:4px; padding:4px; border-radius:10px; background:var(--color-field); margin-bottom:24px; }
+.st-tab { display:flex; align-items:center; justify-content:center; gap:7px; min-height:30px; padding:5px 13px; border:0; border-radius:7px; background:transparent; color:var(--color-ink-2); font-size:12px; cursor:pointer; transition:background 120ms,color 120ms; }
+.st-tab:hover { color:var(--color-ink); background:var(--color-hover); }
+.st-tab[aria-selected=true] { background:var(--color-surface); color:var(--color-ink); box-shadow:var(--shadow-btn); font-weight:500; }
+.st-advanced { display:flex; flex-direction:column; gap:20px; }
+.st-settings-group { padding:20px; border-radius:12px; background:var(--color-surface); }
+.st-settings-group>.st-section-head { margin:0 0 8px; }
+.st-advanced .st-row,.st-advanced .st-number-row { border-bottom:0; padding:12px 0; }
+.st-advanced .st-details { border-top:0; margin-top:12px; padding-top:0; }
+.st-advanced>.st-details { margin-top:0; padding:0 4px; }
+@media(prefers-reduced-motion:reduce) { .st-tab { transition:none; } }
+.st-filters { display:flex; flex-wrap:wrap; gap:5px; margin-bottom:12px; }
+.st-filters button { border-radius:6px; padding:6px 10px; color:var(--color-ink-2); cursor:pointer; font-size:12px; }
+.st-filters button[aria-pressed=true] { background:var(--color-hover-2); color:var(--color-ink); }
+.st-filters button:disabled { opacity:.4; cursor:default; }
+.st-fact { display:flex; gap:12px; padding:16px 0; border-bottom:1px solid var(--color-line); }
+.st-fact-actions { display:flex; align-items:flex-start; gap:3px; }
+.st-icon-button { width:28px; height:28px; display:flex; align-items:center; justify-content:center; border-radius:7px; color:var(--color-ink-2); cursor:pointer; }
+.st-fact-details { color:var(--color-ink-3); font-size:11px; margin-top:6px; overflow-wrap:anywhere; }
+
+.st-empty { padding:20px 0; color:var(--color-ink-2); font-size:12px; }
+.st-spaced { margin-top:18px; }
+.st-notice { display:flex; align-items:center; flex-wrap:wrap; gap:12px; padding:13px 15px; border-radius:8px; background:var(--color-accent-tint); color:var(--color-accent-ink); font-size:12px; line-height:1.7; margin-top:16px; }
+.st-error { color:var(--color-red); font-size:12px; line-height:1.6; margin-top:7px; }
+.st-footer { flex:none; padding:12px 24px; border-top:1px solid var(--color-line); }
+.st-save-state { color:var(--color-ink-2); font-size:11px; }
+.st-exit { padding-top:14px; font-size:13px; }
+.st-exit .st-actions { margin-top:12px; }
+@media(max-width:900px) { .st-content { padding:26px 24px; } .st-connection-body { padding:16px; } .st-connection-head { flex-wrap:wrap; } }
+@media(prefers-reduced-motion:reduce) { .st-switch-thumb { transition:none; } }
+
+/* Shared settings controls: all visuals use the existing application tokens. */
+.st-control { appearance:none; font-family:inherit; }
+.st-control:focus-visible,.st-text-input:focus-visible { outline:2px solid var(--color-accent); outline-offset:3px; }
+.st-text-input { appearance:none; transition:border-color 120ms, background 120ms; }
+.st-text-input[type=number] { -moz-appearance:textfield; }
+.st-text-input::-webkit-inner-spin-button,.st-text-input::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
+.st-switch { padding:0; border:1px solid var(--color-line-strong); width:36px; height:22px; }
+.st-switch-thumb { pointer-events:none; }
+.st-disclosure-trigger { display:flex; align-items:center; gap:8px; min-height:30px; padding:4px 0; background:transparent; color:inherit; text-align:left; cursor:pointer; border-radius:5px; }
+.st-disclosure-trigger:hover { color:var(--color-ink); }
+.st-disclosure-content:not([hidden]) { padding-top:10px; }
+.st-select { position:relative; min-width:0; width:100%; }
+.st-select-trigger { display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%; min-height:30px; padding:5px 9px; border:1px solid var(--color-line-strong); border-radius:8px; background:var(--color-field); color:var(--color-ink); font:inherit; cursor:pointer; text-align:left; }
+.st-select-trigger:hover { border-color:var(--color-ink-3); }
+.st-select-trigger:disabled { opacity:.45; cursor:default; }
+.st-select-menu { position:absolute; z-index:30; top:calc(100% + 6px); left:0; right:0; max-height:240px; overflow:auto; overscroll-behavior:contain; padding:5px; border:1px solid var(--color-line-strong); border-radius:10px; background:var(--color-surface); box-shadow:0 8px 24px #0002; }
+.st-select-option { display:flex; align-items:center; justify-content:space-between; gap:10px; min-height:30px; padding:5px 9px; border-radius:6px; font-size:12px; color:var(--color-ink-2); cursor:pointer; }
+.st-select-option.is-active { background:var(--color-hover-2); color:var(--color-ink); }
+.st-select-option[aria-selected=true] { color:var(--color-ink); font-weight:500; }
+@media(prefers-reduced-motion:reduce) { .st-control svg,.st-text-input { transition:none; } }
+
+/* Memory uses the same text column and action slots while editing. */
+.st-textarea { resize:none; }
+.st-fact { padding:12px 8px; margin:0 -8px; border-bottom:0; border-radius:8px; }
+.st-fact + .st-fact { margin-top:4px; }
+.st-fact:hover { background:var(--color-hover); }
+.st-fact.is-editing { background:var(--color-surface); box-shadow:var(--shadow-hairline); }
+.st-fact-copy { display:grid; margin:0 0 4px; }
+.st-fact-copy>p,.st-fact-mirror,.st-fact-copy .st-textarea { grid-area:1 / 1; padding:4px 6px; margin:0; border:1px solid transparent; font:inherit; line-height:1.65; white-space:pre-wrap; overflow-wrap:anywhere; min-width:0; }
+.st-fact-mirror { visibility:hidden; }
+.st-fact-copy .st-textarea { width:100%; height:100%; min-height:0; overflow:hidden; scrollbar-gutter:auto; background:var(--color-field); border-color:var(--color-line-strong); }
+.st-fact-copy .st-textarea:focus-visible { outline-offset:1px; outline-width:1px; }
+.st-edit-hint { padding-top:6px; font-size:11px; }
+.st-icon-button:disabled { opacity:.35; cursor:default; }
+.st-icon-button:disabled:hover { background:transparent; }
+.st-danger-button { color:var(--color-red); }
+.st-danger-button:hover:not(:disabled) { background:var(--color-red-tint); color:var(--color-red); }
+.st-save-icon { color:var(--color-accent-ink); }
+.st-save-icon:hover:not(:disabled) { background:var(--color-accent-tint); }
+.st-filter { min-height:28px; background:transparent; box-shadow:none; }
+
+.usage-summary { margin-top:8px; color:var(--color-ink-3); font-size:11px; }
+.usage-details .st-disclosure-trigger { min-height:24px; padding:2px 0; line-height:1.5; }
+.usage-details .st-disclosure-content { padding:10px 12px; border-radius:8px; background:var(--color-inset); }
+.usage-details p { margin-top:8px; line-height:1.6; }
+.usage-grid { display:grid; grid-template-columns:1fr auto; gap:5px 20px; }
+.usage-grid dd { color:var(--color-ink-2); font-variant-numeric:tabular-nums; }
+.context-usage { display:flex; flex-wrap:wrap; justify-content:space-between; gap:4px 12px; margin-bottom:7px; font-size:11px; color:var(--color-ink-3); font-variant-numeric:tabular-nums; }
+
+.context-meter { position:relative; color:var(--color-ink-2); flex:none; }
+.context-meter-trigger { display:flex; align-items:center; gap:5px; min-height:28px; padding:3px 5px; border-radius:6px; cursor:help; font-size:11px; font-variant-numeric:tabular-nums; }
+.context-meter-trigger:hover,.context-meter-trigger:focus-visible { background:var(--color-hover); }
+.context-meter-trigger:focus-visible { outline:1px solid var(--color-accent); outline-offset:2px; }
+.context-meter.is-warning { color:var(--color-orange); }
+.context-meter.is-critical { color:var(--color-red); }
+.context-ring { flex:none; }
+.context-meter-tooltip { display:none; position:absolute; bottom:calc(100% + 8px); right:0; width:280px; max-width:calc(100vw - 32px); padding:12px; border-radius:9px; background:var(--color-overlay); box-shadow:var(--shadow-overlay); color:var(--color-ink-2); font-size:11px; line-height:1.65; z-index:40; pointer-events:none; }
+.context-meter:hover .context-meter-tooltip,.context-meter:focus-within .context-meter-tooltip { display:flex; flex-direction:column; gap:5px; }
+.context-meter-tooltip strong { color:var(--color-ink); font-size:12px; }
+.context-meter-tooltip small { font-size:10px; color:var(--color-ink-3); }

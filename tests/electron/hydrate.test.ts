@@ -136,6 +136,32 @@ describe('hydrateMessages', () => {
     expect(out[0].tools[0].toolName).toBe('read_file')
   })
 
+  it('磁盘上的时间戳被带进界面消息', () => {
+    // 时间戳是**持久化**的：存盘时打的戳，读盘后界面要能拿到，
+    // 否则重开 app 之后所有历史消息都没有时间（这正是最初的 bug）。
+    const out = hydrateMessages(
+      [
+        { role: 'user', content: '你好', timestamp: 1000 },
+        { role: 'assistant', content: '在的', timestamp: 2000 },
+      ],
+      S,
+    )
+    expect(out.map((m) => m.timestamp)).toEqual([1000, 2000])
+  })
+
+  it('旧会话没有时间戳时留空，不编一个', () => {
+    // 旧会话文件里没有这个字段。我们确实不知道那些消息何时发生，
+    // 留 undefined 让界面不显示，而不是拿「现在」冒充。
+    const out = hydrateMessages(
+      [
+        { role: 'user', content: '你好' },
+        { role: 'assistant', content: '在的' },
+      ],
+      S,
+    )
+    expect(out.every((m) => m.timestamp === undefined)).toBe(true)
+  })
+
   it('纯文本对话不受影响', () => {
     // 最常见的情况：没有任何工具调用
     const out = hydrateMessages(

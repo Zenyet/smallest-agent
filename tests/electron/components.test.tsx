@@ -110,6 +110,75 @@ describe('MessageBubble', () => {
     expect(bot.querySelector('.bubble--assistant')).toBeTruthy()
   })
 
+  it('composer 焦点环：基础态就有透明环，聚焦只改颜色', () => {
+    // 回归测试。原来基础态没有 outline，聚焦时宽度 0→2px 的同时颜色从
+    // outline-color 的初始值 currentColor(≈--color-ink 近白) 过渡到 accent，
+    // 于是点一下输入框会「白闪一下再变蓝」（实测第一帧 rgb(242,243,244)）。
+    //
+    // 基础态给同宽同偏移的 transparent 之后，只有颜色在动。
+    const { container } = render(
+      <ChatWindow chat={{ messages: [], running: false }} sessionId="s1"
+        onSend={() => {}} onDecide={() => {}} />,
+    )
+    const card = container.querySelector('.shadow-card')
+    if (!card) throw new Error('没找到 composer 卡片')
+    const cls = card.className
+    // 基础态：有宽度、有偏移、颜色透明 —— 三者缺一都会让聚焦时发生跳变
+    expect(cls).toContain('outline-1')
+    expect(cls).toContain('outline-transparent')
+    expect(cls).toContain('outline-offset-[-1px]')
+    // 聚焦态只改颜色，不再改宽度（不能出现 focus-within:outline-2 之类）
+    expect(cls).toContain('focus-within:outline-accent')
+    expect(cls).not.toMatch(/focus-within:outline-\d/)
+  })
+
+  it('两侧操作栏都靠右，用户侧上边距更大', () => {
+    const bar = (role: 'user' | 'assistant') => {
+      const { container } = render(<MessageBubble message={msg({ role })} />)
+      // 操作栏是气泡的兄弟节点，取 group 下最后那个 div
+      const el = container.querySelector('.group > div:last-child')
+      if (!el) throw new Error('没找到操作栏')
+      return el.className
+    }
+    // 助手侧原来是默认左对齐。w-full 是必须的：外层 items-start 会让这一行
+    // 收缩到内容宽度，没有多余空间时 justify-end 不产生任何效果。
+    for (const role of ['user', 'assistant'] as const) {
+      expect(bar(role)).toContain('justify-end')
+      expect(bar(role)).toContain('w-full')
+    }
+    // 用户气泡有底色，操作栏贴着色块下沿显得挤，给更大的上边距
+    expect(bar('user')).toContain('mt-1.5')
+    expect(bar('assistant')).toContain('mt-0.5')
+  })
+
+  it('流式和非流式的正文容器盒模型一致（回答写完不横向跳）', () => {
+    // 回归测试。原来流式那个容器带 pl-5（给「正在生成」那个 icon 腾的位），
+    // 而非流式那个没有 —— 回答一写完 20px 内距凭空消失，整段文字横向跳一格。
+    //
+    // 断言两边类名集合只差一个 relative：它只建立定位上下文，不改盒模型。
+    // 比断言「都没有 pl-5」更严，任何一边以后加了 padding/margin/border 都会被抓到。
+    const cls = (streaming: boolean) => {
+      const { container } = render(<MessageBubble message={msg({ streaming })} />)
+      const el = container.querySelector('.bubble__text')
+      if (!el) throw new Error('没找到 .bubble__text')
+      return new Set(el.className.split(/\s+/).filter(Boolean))
+    }
+    const streaming = cls(true)
+    const done = cls(false)
+    streaming.delete('relative')
+    expect([...streaming].sort()).toEqual([...done].sort())
+  })
+
+  it('「正在生成」的 icon 不占正文的位置（绝对定位 + 负偏移）', () => {
+    // icon 落在气泡左侧的外边距里，而不是靠容器 padding 腾位 ——
+    // 后者会在 streaming 结束时消失，造成横向跳动。
+    const { container } = render(<MessageBubble message={msg({ streaming: true })} />)
+    const icon = container.querySelector('[aria-label="正在生成"]')
+    expect(icon).toBeTruthy()
+    expect(icon!.className).toContain('absolute')
+    expect(icon!.className).toContain('-left-')
+  })
+
   it('渲染挂在消息上的工具调用，按 turn 分组成 ToolCallGroup', () => {
     const tools = [
       { ...toolEvent, turn: 1, toolName: 'search_notes' },
@@ -268,7 +337,7 @@ describe('MessageBubble', () => {
     render(
       <MessageBubble
         message={msg({ role: 'user', content: '旧' })}
-        onEditResend={(t) => sent.push(t)}
+        onEditResend={(_i, t) => sent.push(t)}
         canEdit
       />,
     )
@@ -281,7 +350,7 @@ describe('MessageBubble', () => {
   it('回车发送、Shift+回车不发送（和 composer 同一套手势）', () => {
     const sent: string[] = []
     render(
-      <MessageBubble message={msg({ role: 'user' })} onEditResend={(t) => sent.push(t)} canEdit />,
+      <MessageBubble message={msg({ role: 'user' })} onEditResend={(_i, t) => sent.push(t)} canEdit />,
     )
     fireEvent.click(screen.getByLabelText('编辑'))
     const box = screen.getByLabelText('编辑消息')
@@ -297,7 +366,7 @@ describe('MessageBubble', () => {
     render(
       <MessageBubble
         message={msg({ role: 'user', content: '原样' })}
-        onEditResend={(t) => sent.push(t)}
+        onEditResend={(_i, t) => sent.push(t)}
         canEdit
       />,
     )
@@ -320,7 +389,7 @@ describe('MessageBubble', () => {
   it('清空内容后发送等于取消', () => {
     const sent: string[] = []
     render(
-      <MessageBubble message={msg({ role: 'user' })} onEditResend={(t) => sent.push(t)} canEdit />,
+      <MessageBubble message={msg({ role: 'user' })} onEditResend={(_i, t) => sent.push(t)} canEdit />,
     )
     fireEvent.click(screen.getByLabelText('编辑'))
     fireEvent.change(screen.getByLabelText('编辑消息'), { target: { value: '   ' } })
@@ -426,7 +495,7 @@ describe('ChatWindow', () => {
         onDecide={() => {}}
       />,
     )
-    expect(screen.getByText(/请在设置中配置 DeepSeek API Key/)).toBeTruthy()
+    expect(screen.getByText(/请在凭据设置中配置当前模型的 API Key/)).toBeTruthy()
   })
 
   it('有 pendingApproval 时渲染 ApprovalCard，点允许触发 onDecide("allow")', () => {
@@ -575,12 +644,67 @@ describe('SessionList', () => {
     renamingId: null,
     onRename: () => {},
     onCancelRename: () => {},
+    // 默认没有会话在跑。要测「跑动指示」的用例自己覆盖它
+    runningIds: new Set<string>(),
   }
 
   it('列出所有会话', () => {
     render(<SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />)
     expect(screen.getByText('会话一')).toBeTruthy()
     expect(screen.getByText('会话二')).toBeTruthy()
+  })
+
+  // ## 侧边栏的跑动指示
+  //
+  // 会话可以并发（锁按会话，见 agent-runner.ts），所以用户在 A 会话提问、
+  // 切到 B 会话继续问时，两边都在跑。侧边栏必须两个都标 —— 只标当前打开的
+  // 那个等于告诉他「另一个已经好了」。
+  it('正在跑的会话显示指示', () => {
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        runningIds={new Set(['s1'])}
+      />,
+    )
+    expect(screen.getByLabelText('正在处理')).toBeTruthy()
+  })
+
+  it('没在跑的会话没有指示', () => {
+    render(<SessionList groups={groups} currentId="s1" currentProjectId="p1" {...noop} />)
+    expect(screen.queryByLabelText('正在处理')).toBeNull()
+  })
+
+  it('多个会话并发时各自都标（不是只标当前那个）', () => {
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        runningIds={new Set(['s1', 's2'])}
+      />,
+    )
+    expect(screen.getAllByLabelText('正在处理')).toHaveLength(2)
+  })
+
+  // 没打开的那个会话在跑时也要标 —— 这正是这个功能存在的理由
+  it('标记的是「在跑」而不是「被选中」', () => {
+    render(
+      <SessionList
+        groups={groups}
+        currentId="s1"
+        currentProjectId="p1"
+        {...noop}
+        runningIds={new Set(['s2'])}
+      />,
+    )
+    const marks = screen.getAllByLabelText('正在处理')
+    expect(marks).toHaveLength(1)
+    // 那个指示在 s2 那一行里，不在选中的 s1 行里
+    expect(marks[0].closest('li')?.textContent).toContain('会话二')
   })
 
   it('当前会话有选中样式', () => {

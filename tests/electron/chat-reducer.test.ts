@@ -12,7 +12,8 @@ describe('chatReducer', () => {
   it('user-sent 追加用户消息并标记运行中', () => {
     const s = chatReducer(empty, { type: 'user-sent', sessionId: 's1', text: '你好' })
     expect(s.s1.messages).toEqual([
-      { role: 'user', content: '你好', tools: [], streaming: false },
+      // timestamp 是发送时刻，用 any(Number) —— 断言「打了戳」而不是具体值
+      { role: 'user', content: '你好', tools: [], streaming: false, timestamp: expect.any(Number) },
     ])
     expect(s.s1.running).toBe(true)
   })

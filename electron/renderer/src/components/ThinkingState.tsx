@@ -10,6 +10,19 @@ import type { ToolCallEvent } from '../../../shared/channels'
 //
 // 默认收起：思考过程只是给用户"看它没卡住"的安心感，不是第一优先级信息。
 // 语音/文字回答才是主角，轨迹在需要时再展开。
+// ⚠️ 目前**没有挂载点**（不是死代码，是等一条还没接的数据通路）。
+//
+// 它曾经挂在 ChatWindow 底部显示工具轨迹，但那份数据（lastMsg.tools）
+// 气泡里的 ToolCallGroup 已经渲染了一遍 —— 同一批工具调用在界面上出现两处，
+// 用户报了这个问题。工具调用的实时态现在并进了 ToolCallGroup 的 live。
+//
+// 保留它是因为**本来的归宿还在**：按参考站（beautifului.dev）的划分，
+// 02 Thinking 显示的是**推理过程**，05 Tool Chips 才是工具调用。推理那条路
+// 在 acp.ts 的 agent_thought_chunk 分支上，注释写着「接了要新开一条 IPC 通路，
+// 而『思考过程要不要显示』是个产品判断」—— 那一天到来时，这个组件就是它的家。
+//
+// 如果你决定不做推理显示，连同这段注释一起删掉即可。
+
 export function ThinkingState({ tools }: { tools: ToolCallEvent[] }) {
   const [open, setOpen] = useState(false)
   const current = tools.at(-1)

@@ -1,3 +1,8 @@
+import { modelContext } from '../../../shared/model-context'
+import { ContextUsage } from './TokenUsage'
+import { ProjectTaskCard, ProjectTaskStarter } from './ProjectTaskCard'
+import type { ProjectTask } from '../../../shared/project-task'
+import type { RuntimeCapability } from '../../../shared/channels'
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { MessageBubble } from './MessageBubble'
 import { ProviderPicker } from './ProviderPicker'
@@ -5,11 +10,17 @@ import { PermissionPicker } from './PermissionPicker'
 import { CliModelPicker } from './CliModelPicker'
 import { ApprovalCard } from './ApprovalCard'
 import { LoadingState } from './LoadingState'
-import { ThinkingState } from './ThinkingState'
 import { Icon } from './Icon'
 import { ModelPicker } from './ModelPicker'
 import { AttachmentButton, AttachmentStrip, acceptFiles } from './AttachmentPicker'
 import { useFileDrop } from '../use-file-drop'
+import {
+  gapToBottom,
+  initialPinState,
+  onScrolled,
+  onSessionSwitch,
+  onUserIntent,
+} from '../scroll-pin'
 import type { VendorEntry } from '../../../main/vendors'
 import { visibleRange } from '../visible-window'
 import type { SessionChat } from '../chat-reducer'
@@ -19,7 +30,7 @@ import type { ApprovalDecision, ErrorCode } from '../../../shared/channels'
 import type { ContentPart } from '../../../../src/types'
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
-  API_KEY_MISSING: '请在设置中配置 DeepSeek API Key',
+  API_KEY_MISSING: '请在凭据设置中配置当前模型的 API Key',
   MODEL_ERROR: '模型调用失败，请检查网络或 API 配额',
   MAX_TURNS: 'Agent 反复调用工具未能收敛，已停止（可在设置中调大 MAX_TURNS）',
   BUSY: '上一个问题还在处理中，请稍候',
@@ -51,10 +62,21 @@ export function ChatWindow({
   onPickProvider,
   onPickPermission,
   onPickCliModel,
+  projectTask, projectName, onStartProjectTask, startingTask, taskStartError,
+  onAcceptProjectTask, onExportProjectTask, capabilities, onOpenRetrievalSettings,
 }: {
+  projectTask?: ProjectTask
+  projectName?: string
+  onStartProjectTask?: () => void
+  startingTask?: boolean
+  taskStartError?: string
+  onAcceptProjectTask?: () => Promise<unknown>
+  onExportProjectTask?: () => Promise<string | null>
+  capabilities?: RuntimeCapability[]
+  onOpenRetrievalSettings?: () => void
   chat: SessionChat
   sessionId: string
-  onSend: (text: string) => void
+  onSend: (text: string, attachments?: ContentPart[]) => unknown
   // 停止这个会话正在跑的那一轮。可选：设置窗口那类地方不需要。
   onCancel?: () => void
   onDecide: (decision: ApprovalDecision) => void
@@ -81,11 +103,18 @@ export function ChatWindow({
   // 附件被拒的原因（类型不认 / 超 20MB / 读不出）。不用 alert：
   // 那是个模态框，多选时每个坏文件弹一次，得连点好几下才回得到输入框。
   const [attachError, setAttachError] = useState<string | null>(null)
+  const currentSession = useRef(sessionId)
+  currentSession.current = sessionId
+  const fileGeneration = useRef(0)
+  const [readingFiles, setReadingFiles] = useState(0)
+  const sendVersions = useRef(new Map<string, number>())
+  const failedDrafts = useRef(new Map<string, { text: string; attachments: ContentPart[] }>())
   const endRef = useRef<HTMLDivElement>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const [isNearBottom, setIsNearBottom] = useState(true)
-  const userScrolledRef = useRef(false)
+  // 自动滚动的粘附状态。用 ref 而不是 state：改它不该触发重渲染 ——
+  // 放 state 会形成「滚动改状态 → 重渲染 → effect 重跑 → 又滚」的自激循环。
+  const pinRef = useRef(initialPinState())
 
   // showAll 是展开状态，属于"当前打开的那个会话"，不能泄露到切换后的新会话。
   // 不能用 key={sessionId} 让整个组件重挂，那会丢掉 text（用户打到一半的输入）。
@@ -98,46 +127,81 @@ export function ChatWindow({
   // 只能靠这条注释守住 —— 别改回 useEffect。
   useLayoutEffect(() => {
     setShowAll(false)
-    setIsNearBottom(true)
-    userScrolledRef.current = false
+    // 切到新会话时重新粘住底部：那是「打开一个对话」的预期起点
+    pinRef.current = onSessionSwitch()
     // 附件和 showAll 同理，属于「当前打开的那个会话」。不清的话在 A 会话
     // 挂的图会跟到 B 会话发出去 —— 而用户在 B 里根本没见过它。
-    setAttachments([])
+    fileGeneration.current += 1
+    setReadingFiles(0)
+    const failed = failedDrafts.current.get(sessionId)
+    setAttachments(failed?.attachments ?? [])
+    if (failed) {
+      setText(failed.text)
+      failedDrafts.current.delete(sessionId)
+    }
     setAttachError(null)
   }, [sessionId])
 
-  // 监听用户滚动，判断是否在底部附近（距离底部 < 150px 视为「接近底部」）
+  // 自动滚动的粘附。决策逻辑全在 scroll-pin.ts（纯函数，那边有测试和
+  // 完整的来由说明）—— 这里只负责把 DOM 事件喂给它、拿结果去滚。
   useEffect(() => {
     const container = scrollContainerRef.current
     if (!container) return
 
-    const handleScroll = () => {
-      const { scrollTop, scrollHeight, clientHeight } = container
-      const distanceToBottom = scrollHeight - scrollTop - clientHeight
-      const nearBottom = distanceToBottom < 150
-
-      // 用户主动向上滚动时标记（非程序触发的滚动）
-      if (!nearBottom && userScrolledRef.current === false) {
-        userScrolledRef.current = true
-      }
-      // 用户滚回底部附近时恢复自动滚动
-      if (nearBottom && userScrolledRef.current === true) {
-        userScrolledRef.current = false
-      }
-
-      setIsNearBottom(nearBottom)
+    const gap = () => gapToBottom(container)
+    const intent = (up: boolean) => {
+      pinRef.current = onUserIntent(pinRef.current, up, gap(), Date.now())
     }
 
-    container.addEventListener('scroll', handleScroll, { passive: true })
-    return () => container.removeEventListener('scroll', handleScroll)
+    const onWheel = (e: WheelEvent) => intent(e.deltaY < 0)
+    // 触摸板/触屏：没有 deltaY，用 scrollTop 的变化方向推断
+    let lastTouchTop = 0
+    const onTouchStart = () => {
+      lastTouchTop = container.scrollTop
+    }
+    const onTouchMove = () => {
+      intent(container.scrollTop < lastTouchTop)
+      lastTouchTop = container.scrollTop
+    }
+    // 键盘挂在 document 上，不挂容器：那个 div 不可聚焦（没有 tabIndex），
+    // 挂它收不到任何 keydown。给它加 tabIndex 又会引入一个焦点环和一个
+    // 多余的 Tab 停靠点 —— 为了滚动去改焦点顺序不划算。
+    //
+    // 代价是要跳过输入框：composer 里的方向键是移动光标，不是滚动列表。
+    const onKeyDown = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable)) return
+      if (e.key === 'ArrowUp' || e.key === 'PageUp' || e.key === 'Home') intent(true)
+      if (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === 'End') intent(false)
+    }
+    // 拖滚动条：wheel/touch 抓不到它，只能退回看 scroll
+    const onScroll = () => {
+      pinRef.current = onScrolled(pinRef.current, gap(), Date.now())
+    }
+
+    container.addEventListener('wheel', onWheel, { passive: true })
+    container.addEventListener('touchstart', onTouchStart, { passive: true })
+    container.addEventListener('touchmove', onTouchMove, { passive: true })
+    document.addEventListener('keydown', onKeyDown)
+    container.addEventListener('scroll', onScroll, { passive: true })
+    return () => {
+      container.removeEventListener('wheel', onWheel)
+      container.removeEventListener('touchstart', onTouchStart)
+      container.removeEventListener('touchmove', onTouchMove)
+      document.removeEventListener('keydown', onKeyDown)
+      container.removeEventListener('scroll', onScroll)
+    }
   }, [])
 
-  // 新消息到达时，只在用户位于底部附近时才自动滚动
+  // 内容变了：粘着底就跟过去，否则原地不动。
+  //
+  // behavior 用默认的 'auto'（瞬时）而不是 'smooth'：平滑动画会持续几百毫秒
+  // 并不停派发 scroll 事件，而流式回答每个 chunk 都会再触发一次 —— 动画首尾
+  // 相接就把用户的滚动位置一直往下拽。瞬时跳转没这个问题，而且流式下每秒
+  // 好几次「平滑滚动」本来也看不出平滑，只是黏手。
   useEffect(() => {
-    if (isNearBottom) {
-      endRef.current?.scrollIntoView({ behavior: 'smooth' })
-    }
-  }, [chat.messages, isNearBottom])
+    if (pinRef.current.pinned) endRef.current?.scrollIntoView()
+  }, [chat.messages])
 
   // 输入框随内容自动增高，封顶后转为内部滚动。手法抄自 bui-reference 的
   // PromptBar.tsx:326-330——高度先归零再读 scrollHeight，是因为不归零的话
@@ -163,30 +227,55 @@ export function ChatWindow({
 
   // 只看**这个**会话自己在不在跑。别的会话在跑跟这里无关 —— 锁是按会话的。
   const blocked = chat.running
-  const canSend = !blocked && text.trim().length > 0
+  const canSend = !blocked && readingFiles === 0 && (text.trim().length > 0 || attachments.length > 0)
   const canStop = chat.running && Boolean(onCancel)
 
   // 拖进来的文件走和「点按钮选」完全同一份校验（acceptFiles），
   // 不各写一份 —— 见 AttachmentPicker.tsx 里那个函数的注释。
   const takeFiles = useCallback(
     (files: File[]) => {
+      const generation = fileGeneration.current
       setAttachError(null)
-      void acceptFiles(files, (att) => setAttachments((prev) => [...prev, att]), setAttachError)
+      setReadingFiles((n) => n + 1)
+      void acceptFiles(files, (att) => {
+        if (generation === fileGeneration.current) setAttachments((prev) => [...prev, att])
+      }, (error) => {
+        if (generation === fileGeneration.current) setAttachError(error)
+      }).finally(() => {
+        if (generation === fileGeneration.current) setReadingFiles((n) => n - 1)
+      })
     },
     [],
   )
-  // 跑起来时不收：那一轮的请求已经发出去了，这时候收下的东西只会静默
-  // 留在下一条消息上，而用户以为它进了当前这轮
   const { dragging, dropProps } = useFileDrop(takeFiles, blocked)
 
   const submit = () => {
     if (!canSend) return
-    // TODO: 实现附件支持后取消注释
-    // onSend(text.trim(), attachments)
-    onSend(text.trim())
+    const id = sessionId
+    const version = (sendVersions.current.get(id) ?? 0) + 1
+    sendVersions.current.set(id, version)
+    const draft = { text: text.trim(), attachments: [...attachments] }
+    failedDrafts.current.delete(id)
+    fileGeneration.current += 1
     setText('')
     setAttachments([])
     setAttachError(null)
+    const restore = () => {
+      if (sendVersions.current.get(id) !== version) return
+      failedDrafts.current.set(id, draft)
+      if (currentSession.current === id) {
+        setText(draft.text)
+        setAttachments(draft.attachments)
+        setAttachError('发送未完成，已保留文字和附件。检查错误后可重试。')
+        failedDrafts.current.delete(id)
+      }
+    }
+    try {
+      const result = onSend(draft.text, draft.attachments.length ? draft.attachments : undefined)
+      void Promise.resolve(result).then((ok) => { if (ok === false) restore() }, restore)
+    } catch {
+      restore()
+    }
   }
 
   const placeholder = (): string => {
@@ -207,11 +296,21 @@ export function ChatWindow({
   // 下面该渲染三种指示里的哪一种。数据契约里没有独立的"当前轮"字段，
   // live 就从 lastMsg 就地推导 —— running 是信号，tools/content/streaming 是素材。
   const lastMsg = chat.messages.at(-1)
-  const liveThinking = chat.running && lastMsg?.role === 'assistant' && lastMsg.tools.length > 0
+  // 「最后一组工具正在跑」。三个条件缺一不可，尤其是最后那条 content.length === 0：
+  //
+  // 没有它的话，模型开始写答案之后 chip 会一直显示「正在调用 fetch_url」——
+  // 而那时工具早跑完了，它在写字。这是原来底部 ThinkingState 就有的毛病，
+  // 搬过来的时候一并修掉：正文一开始出现，chip 就退回静态摘要，
+  // 「还在生成」改由 StreamingText 左边距那个转圈负责。
+  const liveTools =
+    chat.running &&
+    lastMsg?.role === 'assistant' &&
+    lastMsg.tools.length > 0 &&
+    lastMsg.content.length === 0
   // 已经有流式文字在往外冒时，交给 MessageBubble 里的 StreamingText；这里只补
   // "连文字都没有"的纯等待态，避免和气泡里的光标/打字机打架。
   const liveStreamingText = chat.running && lastMsg?.role === 'assistant' && lastMsg.streaming && lastMsg.content.length > 0
-  const liveIdle = chat.running && !liveThinking && !liveStreamingText
+  const liveIdle = chat.running && !liveTools && !liveStreamingText
 
   return (
     // 整个对话区都是投放区，不只 composer：用户拖着图过来时视线在对话
@@ -219,6 +318,12 @@ export function ChatWindow({
     // relative 是给下面那层覆盖提示定位用的。
     <section className="chat relative flex min-w-0 flex-1 flex-col" {...dropProps}>
       <div ref={scrollContainerRef} className="chat__scroll flex flex-1 flex-col gap-2.5 overflow-y-auto px-8 py-6">
+        {projectTask && onAcceptProjectTask && onExportProjectTask && (
+          <ProjectTaskCard key={projectTask.id} task={projectTask} onAccept={onAcceptProjectTask} onExport={onExportProjectTask} />
+        )}
+        {!projectTask && chat.messages.length === 0 && !chat.running && onStartProjectTask && (
+          <ProjectTaskStarter projectName={projectName} starting={startingTask} error={taskStartError} onStart={onStartProjectTask} />
+        )}
         {hiddenCount > 0 && (
           <button
             onClick={() => setShowAll(true)}
@@ -237,16 +342,52 @@ export function ChatWindow({
             message={m}
             // 下标要加回 start：slice 之后 i 是窗口内的位置，
             // 而截断要的是它在完整 messages 里的位置
-            onEditResend={onEditResend && ((text) => onEditResend(start + i, text))}
+            index={start + i}
+            // 直接传下去，不在这里包闭包 —— 包了每次渲染都是新函数，
+            // 会把 MessageBubble 的 memo 破掉（见那边的注释）
+            onEditResend={onEditResend}
             // 跑起来时不许编辑：那一轮还在往 messages 里写，之后的截断会和它打架
             canEdit={!chat.running}
+            // 实时态只给**最后一条**消息 —— 前面的都已经结束了
+            live={liveTools && start + i === chat.messages.length - 1}
           />
         ))}
-        {/* 实时指示：有可展开的工具轨迹就露 ThinkingState，否则（纯等待）用像素加载器。
-            两者都在窗口化 slice 之外 —— 它们只属于"现在正在发生的这一轮"，不受
-            「显示更早的消息」窗口影响（窗口折叠的是历史，不是当下） */}
-        {liveThinking && <ThinkingState tools={lastMsg!.tools} />}
-        {liveIdle && <LoadingState startedAt={chat.startedAt} />}
+        {/* 实时指示：纯等待（还没有任何工具/正文）时的像素加载器。
+            在窗口化 slice 之外 —— 它只属于"现在正在发生的这一轮"，不受
+            「显示更早的消息」窗口影响（窗口折叠的是历史，不是当下）
+
+            ## 这里原来还有一个 ThinkingState，为什么去掉了
+
+            它显示「正在调用 X」+ 可展开的工具轨迹 —— 而**同一份 lastMsg.tools
+            已经由气泡里的 ToolCallGroup 渲染了一遍**。跑动时同一批工具调用
+            在界面上出现两处：气泡里一个折叠 chip，底部一个实时行。
+
+            按参考站（beautifului.dev）的划分，02 Thinking 和 05 Tool Chips
+            是两个组件：前者给推理过程，后者给工具调用。我们把工具喂给了
+            两边，所以重了。现在实时态并进 chip 自己（ToolCallGroup 的 live），
+            工具调用全程只有一处表示。
+
+            ## 为什么套一个常驻的槽位，而不是让两者各自条件渲染
+
+            原来这两行是并列的条件渲染，于是**一轮之内**会发生两次高度变化：
+              1. 用户发出 → LoadingState 出现
+              2. 模型开始吐字 → liveIdle 变 false，LoadingState 整个卸载
+
+            第 2 次最难受：它发生在你正盯着文字读的时候，下面凭空少掉一块，
+            整段内容往下沉一格（滚动粘底时表现为视口里的文字跳一下）。
+
+            槽位在 running 期间**一直在**，里面换谁不影响外面的高度：
+            LoadingState 出现/消失都不改变外面的高度。
+            min-h-7 = 28px，对齐 LoadingState 自身的高度。
+
+            代价是**这一跳被推迟到了轮次结束**（running 变 false，槽位卸载）。
+            这是没法消掉的 —— 除非永久留一块空地。推迟本身是划算的：
+            那一刻回答刚写完，注意力正要离开，比读到一半时跳要好。 */}
+        {chat.running && (
+          <div className="flex min-h-7 flex-col justify-center gap-2.5">
+            {liveIdle && <LoadingState startedAt={chat.startedAt} />}
+          </div>
+        )}
         {chat.pendingApproval && <ApprovalCard request={chat.pendingApproval} onDecide={onDecide} />}
         {chat.error && (
           <p className="chat__error rounded-card bg-red-tint px-2.5 py-1.5 text-[12.5px] text-red shadow-hairline">
@@ -262,13 +403,36 @@ export function ChatWindow({
           目标截图的结构对齐。焦点态挪到卡片外框上（focus-within），呼应
           组件语言里「聚焦态用一圈柔和描边而非阴影加深」的建议。 */}
       <div className="border-t border-line px-8 pt-2.5 pb-5">
-        <div className="flex flex-col gap-1 rounded-card bg-surface p-2 shadow-card transition-[outline-color] duration-150 focus-within:outline-2 focus-within:outline-offset-[-1px] focus-within:outline-accent">
+        {capabilities?.some((c) => c.state === 'failed' || c.state === 'loading') && (
+          <details className="mb-2 text-[11.5px] text-ink-3">
+            <summary className="cursor-pointer">{capabilities.some((c) => c.state === 'failed') ? '部分能力暂不可用 · 基础对话仍可使用' : '正在准备扩展能力 · 基础对话已就绪'}</summary>
+            <ul className="mt-2 space-y-1">
+              {capabilities.map((c) => <li key={c.id}>{c.label}：{c.detail}</li>)}
+            </ul>
+            {onOpenRetrievalSettings && <button type="button" onClick={onOpenRetrievalSettings} className="mt-2 text-accent-ink">查看检索设置</button>}
+          </details>
+        )}
+        {/* 焦点环：**基础态就画一圈透明的**，聚焦只改颜色。
+
+            原来基础态完全没有 outline，聚焦时 `focus-within:outline-2` 让宽度
+            从 0 跳到 2px、样式变 solid，而 `transition-[outline-color]` 让颜色
+            从 `outline-color` 的初始值 `currentColor`（≈ --color-ink，近白）
+            过渡到 accent —— 于是点一下输入框会看到「白闪一下再变蓝」。
+
+            基础态给同宽同偏移的 transparent 之后，宽度/样式/偏移全程不变，
+            只有颜色 transparent → accent 在动，没有中间那个白。
+            宽度也从 2px 收到 1px：跟浮层那圈 hairline 一个量级。 */}
+          <div className="flex flex-col gap-1 rounded-card bg-surface p-2 shadow-card outline-1 outline-offset-[-1px] outline-transparent transition-[outline-color] duration-150 focus-within:outline-accent">
           {/* 附件预览在输入框**上方**：先看到带了什么，再看到说了什么。
               放在下面那行控件里会把 h-7 的选择器行撑到两倍高。 */}
           <AttachmentStrip
             attachments={attachments}
             onRemove={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
           />
+          {readingFiles > 0 && <p role="status" className="px-1 text-[11.5px] text-ink-3">正在读取附件…</p>}
+          {attachments.some((p) => p.type === 'image' || (p.type === 'file' && p.mimeType === 'application/pdf')) && (
+            <p className="px-1 text-[11.5px] text-ink-3">图片和 PDF 需要当前模型支持；发送失败会保留附件。</p>
+          )}
           {attachError && (
             <p className="px-1 pb-0.5 text-[11.5px] font-normal text-red">{attachError}</p>
           )}
@@ -321,6 +485,7 @@ export function ChatWindow({
               {/* 附件入口放在最左：它回答的是「这条消息带什么」，比
                   「谁来跑/用哪个模型」更靠近内容本身 */}
               <AttachmentButton
+                onFiles={takeFiles}
                 onAdd={(att) => {
                   setAttachments((prev) => [...prev, att])
                   // 上一次的报错要在成功一次之后消失，否则那行红字会一直挂着
@@ -349,6 +514,13 @@ export function ChatWindow({
               )}
               {!providers && !modelCatalog && <span />}
             </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <ContextUsage messages={chat.messages} draft={text}
+                model={isBuiltin ? currentModel ?? '' : providers?.currentModel ?? ''}
+                vendor={isBuiltin ? currentVendor ?? '' : providers?.current ?? ''} external={!isBuiltin}
+                capacity={isBuiltin
+                  ? modelContext(currentVendor ?? '', currentModel ?? '', modelCatalog?.find(v => v.id === currentVendor)?.models.find(m => m.id === currentModel)?.contextWindow)
+                  : modelContext(providers?.current ?? '', providers?.currentModel ?? '', providers?.models.find(m => m.id === providers.currentModel)?.contextWindow)} />
             {canStop ? (
               <button
                 type="button"
@@ -375,6 +547,7 @@ export function ChatWindow({
                 <Icon name="send" size={16} strokeWidth={2.4} />
               </button>
             )}
+            </div>
           </div>
         </div>
       </div>

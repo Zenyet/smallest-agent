@@ -1,3 +1,4 @@
+import type { ContentPart } from '../../../src/types'
 // 前端把 IPC 事件流累积成可渲染的消息列表。做成纯 reducer 是为了能直接单测 ——
 // 流式累加 / 缓存命中没有 chunk / 事件分桶 这几处最容易写错，值得测。
 import type {
@@ -15,12 +16,16 @@ import type {
 import { hydrateMessages } from './hydrate'
 
 export interface ChatMessage {
+  usages?: import('../../../src/types').TokenUsage[]
   role: 'user' | 'assistant'
   content: string
+  contentParts?: ContentPart[]
   tools: ToolCallEvent[]
   verdict?: { grounded: boolean; issues: string[] }
   cacheHit?: boolean
   streaming: boolean
+  /** 用户消息：发送时刻；助手消息：回复完成时刻。Date.now()。历史回放无此字段。 */
+  timestamp?: number
 }
 
 export interface SessionChat {
@@ -64,7 +69,7 @@ export interface SessionChat {
 export type ChatState = Record<string, SessionChat>
 
 export type ChatAction =
-  | { type: 'user-sent'; sessionId: string; text: string }
+  | { type: 'user-sent'; sessionId: string; text: string; attachments?: ContentPart[] }
   | { type: 'loaded'; sessionId: string; messages: Message[] }
   | { type: 'chunk'; event: MessageChunkEvent }
   | { type: 'tool-call'; event: ToolCallEvent }
@@ -126,21 +131,23 @@ function update(state: ChatState, sessionId: string, fn: (chat: SessionChat) => 
 
 export function chatReducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
-    case 'user-sent':
+    case 'user-sent': {
+      const now = Date.now()
       return update(state, action.sessionId, (chat) => ({
         ...chat,
         error: undefined,
         running: true,
         // 这一轮的起点。秒表读它而不是自己从挂载起数 —— 见 startedAt 的注释。
-        startedAt: Date.now(),
+        startedAt: now,
         // 新一轮开始：之前那次落定跟这一轮无关，清掉。不清的话这个会话
         // 之后再也没法被 reconcile 补上「正在跑」。
         settled: false,
         messages: [
           ...chat.messages,
-          { role: 'user', content: action.text, tools: [], streaming: false },
+          { role: 'user', content: action.text, ...(action.attachments?.length ? { contentParts: action.attachments } : {}), tools: [], streaming: false, timestamp: now },
         ],
       }))
+    }
 
     case 'loaded':
       // 磁盘历史回放时只替换 messages，不破坏当前这轮（如果在跑）的实时状态。
@@ -187,7 +194,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
 
     case 'chunk':
       return update(state, action.event.sessionId, (chat) =>
-        withAssistant(chat, (m) => ({ ...m, content: m.content + action.event.text, streaming: true })),
+        withAssistant(chat, (m) => ({ ...m, content: m.content + action.event.text, ...(action.event.usage ? { usages: [...(m.usages ?? []), action.event.usage] } : {}), streaming: true })),
       )
 
     case 'tool-call':
@@ -195,10 +202,11 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         withAssistant(chat, (m) => ({ ...m, tools: [...m.tools, action.event] })),
       )
 
-    case 'complete':
+    case 'complete': {
+      const completedAt = Date.now()
       return update(state, action.event.sessionId, (chat) => ({
         // 用完整答案替换累积的 delta：流式可能丢字，以最终文本为准
-        ...withAssistant(chat, (m) => ({ ...m, content: action.event.text, streaming: false })),
+        ...withAssistant(chat, (m) => ({ ...m, content: action.event.text, streaming: false, timestamp: completedAt })),
         running: false,
         // 这一轮落定了。之后到达的 hydrate-running（快照可能拍摄于这之前）
         // 要被挡掉，否则会把 running 重新点亮而再没人来清 —— 见 settled 的注释。
@@ -207,6 +215,7 @@ export function chatReducer(state: ChatState, action: ChatAction): ChatState {
         // 要么 5 分钟超时自动拒绝——无论哪种，UI 都不该再留着"等您决策"的弹窗。
         pendingApproval: undefined,
       }))
+    }
 
     case 'verdict':
       return update(state, action.event.sessionId, (chat) =>

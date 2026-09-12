@@ -118,6 +118,103 @@ describe('「已等待 Ns」跨会话切换存活', () => {
   })
 })
 
+describe('live 指示槽位在整轮里高度稳定', () => {
+  // 回归测试。原来 ThinkingState / LoadingState 各自条件渲染，于是模型一开始
+  // 吐字（liveIdle 变 false）LoadingState 就整个卸载 —— 用户正在读的文字
+  // 下面凭空少一块，内容跳一格。现在套了一个 running 期间常驻的槽位。
+  const slot = (c: HTMLElement) => c.querySelector('.chat__scroll > .min-h-7')
+
+  const win = (chat: Parameters<typeof ChatWindow>[0]['chat']) =>
+    render(
+      <ChatWindow chat={chat} sessionId="s1" onSend={() => {}} onDecide={() => {}} />,
+    ).container
+
+  it('纯等待态：槽位在，里面是 LoadingState', () => {
+    const c = win({ messages: [], running: true, startedAt: BASE })
+    expect(slot(c)).toBeTruthy()
+    expect(screen.getByText(/Agent 正在处理/)).toBeTruthy()
+  })
+
+  it('开始吐字后槽位仍然在（这是原来会跳的那一下）', () => {
+    const c = win({
+      running: true,
+      startedAt: BASE,
+      messages: [
+        { role: 'user', content: '问', tools: [], streaming: false },
+        { role: 'assistant', content: '答到一半', tools: [], streaming: true },
+      ],
+    })
+    // 里面已经空了（liveIdle 和 liveThinking 都是 false），但槽位本身还在撑高度
+    expect(slot(c)).toBeTruthy()
+    expect(screen.queryByText(/Agent 正在处理/)).toBeNull()
+  })
+
+  it('轮次结束后槽位卸载', () => {
+    const c = win({
+      running: false,
+      messages: [{ role: 'assistant', content: '答完了', tools: [], streaming: false }],
+    })
+    expect(slot(c)).toBeNull()
+  })
+})
+
+describe('工具调用只有一处表示', () => {
+  const tool = {
+    sessionId: 's1', turn: 1, toolName: 'fetch_url',
+    args: { url: 'https://x.com' }, output: '{"ok":1}',
+  }
+  const win = (chat: Parameters<typeof ChatWindow>[0]['chat']) =>
+    render(<ChatWindow chat={chat} sessionId="s1" onSend={() => {}} onDecide={() => {}} />)
+      .container
+
+  it('跑动中：工具只在气泡的 chip 里，底部不再有第二份', () => {
+    // 回归测试。原来底部还有一个 ThinkingState 显示同一份 lastMsg.tools，
+    // 于是同一批工具调用在界面上出现两处（用户报的就是这个）。
+    const c = win({
+      running: true, startedAt: BASE,
+      messages: [
+        { role: 'user', content: '看看这个', tools: [], streaming: false },
+        { role: 'assistant', content: '', tools: [tool], streaming: true },
+      ],
+    })
+    // chip 在气泡里，且是实时态
+    const chips = c.querySelectorAll('.bubble .tool-group')
+    expect(chips).toHaveLength(1)
+    expect(chips[0].textContent).toContain('正在调用 fetch_url')
+
+    // 关键断言：工具名在**整页**只出现一次。
+    //
+    // 不能只查底部槽位里有没有 .tool-group —— 重复的那份是 ThinkingState，
+    // 它有自己的一套标记，压根不带这个类名，那样断言等于没断言
+    // （验证过：把 ThinkingState 加回去，测试照样绿）。按渲染出来的文本数
+    // 才抓得住「同一份数据被画了两遍」，不管画它的是哪个组件。
+    expect(screen.queryAllByText(/fetch_url/)).toHaveLength(1)
+  })
+
+  it('正文一开始出现，chip 就退回静态摘要', () => {
+    // 工具早跑完了、模型在写字，这时还显示「正在调用 X」是错的。
+    // 「还在生成」由 StreamingText 左边距那个转圈负责。
+    const c = win({
+      running: true, startedAt: BASE,
+      messages: [
+        { role: 'user', content: '看看这个', tools: [], streaming: false },
+        { role: 'assistant', content: '读到了，内容是…', tools: [tool], streaming: true },
+      ],
+    })
+    const chip = c.querySelector('.bubble .tool-group')!
+    expect(chip.textContent).not.toContain('正在调用')
+    expect(chip.textContent).toContain('本轮 1 次工具调用')
+  })
+
+  it('轮次结束后 chip 是静态的', () => {
+    const c = win({
+      running: false,
+      messages: [{ role: 'assistant', content: '好了', tools: [tool], streaming: false }],
+    })
+    expect(c.querySelector('.bubble .tool-group')!.textContent).not.toContain('正在调用')
+  })
+})
+
 describe('loading 图标在文本左侧', () => {
   // 用户的要求：「响应中应该改为在左侧的对话框文本左侧增加 loading icon」
 

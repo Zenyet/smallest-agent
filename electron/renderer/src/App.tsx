@@ -1,8 +1,10 @@
+import type { ProjectTask } from '../../shared/project-task'
+import type { ContentPart } from '../../../src/types'
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { SessionList } from './components/SessionList'
 import { catalog as buildCatalog, DEFAULT_VENDOR, defaultModel } from '../../main/vendors'
 import { ChatWindow } from './components/ChatWindow'
-import { SettingsPanel } from './components/SettingsPanel'
+import { SettingsPanel, type SettingsPanelHandle } from './components/SettingsPanel'
 import { SettingsNav } from './components/SettingsNav'
 import { SECTIONS, type SectionId } from './settings-fields'
 import type { PermissionMode } from '../../main/providers'
@@ -49,6 +51,13 @@ export function App() {
   const [chats, dispatch] = useReducer(chatReducer, {})
   const [sessions, setSessions] = useState<SessionMeta[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
+  const [projectTasks, setProjectTasks] = useState<Record<string, ProjectTask>>({})
+  const [startingTask, setStartingTask] = useState(false)
+  const [taskStartError, setTaskStartError] = useState('')
+  const receiveTask = useCallback((task: ProjectTask) => {
+    setProjectTasks((prev) => (prev[task.sessionId]?.revision ?? -1) > task.revision
+      ? prev : { ...prev, [task.sessionId]: task })
+  }, [])
   const [status, setStatus] = useState<RuntimeStatusEvent>({ phase: 'embedding', detail: '启动中…' })
   // 项目分组状态。真相在主进程的 electron-store 里（会话文件存不了这个，
   // 见 main/projects.ts 顶部），这里只是一份副本：每次写操作拿主进程返回的
@@ -73,17 +82,28 @@ export function App() {
   // 同步地看到——用 state 的话，读到的可能是还没被这次 setState 提交的旧值。
   const deletedIdsRef = useRef<Set<string>>(new Set())
 
+  const pendingSends = useRef(new Map<string, (ok: boolean) => void>())
+  const settleSend = useCallback((id: string, ok: boolean) => {
+    pendingSends.current.get(id)?.(ok)
+    pendingSends.current.delete(id)
+  }, [])
+
   // 订阅所有 Main → Renderer 事件。每个事件都带 sessionId，
   // reducer 按 sessionId 分桶，所以即使用户切走了，消息也还在。
   useEffect(() => {
     const offs = [
       api.onRuntimeStatus(setStatus),
+      api.onProjectTaskChanged(({ sessionId, task }) => {
+        if (deletedIdsRef.current.has(sessionId)) return
+        if (task) receiveTask(task)
+        else setProjectTasks((prev) => { const next = { ...prev }; delete next[sessionId]; return next })
+      }),
       api.onMessageChunk((event) => dispatch({ type: 'chunk', event })),
       api.onToolCall((event) => dispatch({ type: 'tool-call', event })),
       api.onCacheHit((event) => dispatch({ type: 'cache-hit', event })),
       api.onVerdict((event) => dispatch({ type: 'verdict', event })),
-      api.onError((event) => dispatch({ type: 'error', event })),
-      api.onCancelled((event) => dispatch({ type: 'cancelled', event })),
+      api.onError((event) => { dispatch({ type: 'error', event }); settleSend(event.sessionId, false) }),
+      api.onCancelled((event) => { dispatch({ type: 'cancelled', event }); settleSend(event.sessionId, true) }),
       api.onApprovalRequest((event) => dispatch({ type: 'approval-request', event })),
       // 项目状态的广播。这个窗口自己的写操作已经用返回值更新过一次了，
       // 但广播是"任何来源的改动都到得了每个窗口"的那条通路，两者不冲突
@@ -91,6 +111,7 @@ export function App() {
       api.onProjectsChanged(setProjects),
       api.onMessageComplete((event) => {
         dispatch({ type: 'complete', event })
+        settleSend(event.sessionId, true)
         // 答完了会话文件才落盘，这时候刷新列表才能拿到标题
         void api
           .listSessions()
@@ -133,6 +154,8 @@ export function App() {
   // 接着问，独立窗口每次都得切窗口、还会挡住对话。放右栏之后它和会话是同一
   // 层级的两个视图，侧边栏始终在，切回来就是一下。
   const [showSettings, setShowSettings] = useState(false)
+  const settingsPanel = useRef<SettingsPanelHandle>(null)
+  const [initialMemoryTab, setInitialMemoryTab] = useState<'facts' | 'notes'>('facts')
   // 当前在设置的哪一页。状态提到这里而不是留在 SettingsPanel 里，因为
   // 现在有**两个**组件要读它：左栏的 SettingsNav 画选中态，右栏的
   // SettingsPanel 决定渲染哪一页。留在面板里的话导航拿不到。
@@ -152,8 +175,8 @@ export function App() {
   // 保存：拿主进程返回的完整设置覆盖本地副本，不自己推算下一个状态
   // （和 projects 那几个写操作同一个约定）。主进程还会广播
   // onSettingsChanged，那次覆盖是幂等的。
-  const saveSettings = useCallback(async (patch: DesktopSettings) => {
-    const next = await api.saveSettings(patch)
+  const saveSettings = useCallback(async (patch: DesktopSettings, unset?: string[]) => {
+    const next = await api.saveSettings(patch, unset)
     setSettings(next)
   }, [])
 
@@ -205,6 +228,17 @@ export function App() {
       }
     })()
   }, [status.phase])
+
+  useEffect(() => {
+    if (!currentId || status.phase !== 'ready') return
+    let cancelled = false
+    void api.getProjectTask(currentId).then((task) => {
+      if (!cancelled && task && !deletedIdsRef.current.has(task.sessionId)) receiveTask(task)
+    }).catch((err: unknown) => {
+      if (!cancelled) setTaskStartError(err instanceof Error ? err.message : String(err))
+    })
+    return () => { cancelled = true }
+  }, [currentId, status.phase, receiveTask])
 
   // --- composer 的模型选择器 ---
   //
@@ -283,6 +317,18 @@ export function App() {
     [currentId],
   )
 
+  // 启用/停用一个外部 CLI（设置页的开关）。和 pickProvider 同一个约定：
+  // 拿主进程返回的完整视图覆盖，不自己推算。
+  const toggleProvider = useCallback(
+    (providerId: string, enabled: boolean) => {
+      if (!currentId) return
+      void api.toggleProvider(currentId, providerId, enabled).then(setProviders).catch((err: unknown) => {
+        console.error('[providers] 启用/停用失败：', err instanceof Error ? err.message : err)
+      })
+    },
+    [currentId],
+  )
+
   const pickPermission = useCallback(
     (mode: PermissionMode) => {
       if (!currentId) return
@@ -351,6 +397,30 @@ export function App() {
     // 刚添加完就选中它：用户下一步大概率是在这个项目里开对话。
     setCurrentProjectId(result.project.id)
   }, [])
+
+  const startProjectTask = useCallback(async () => {
+    if (startingTask) return
+    setStartingTask(true)
+    setTaskStartError('')
+    try {
+      let projectId = currentProjectId
+      if (!projectId) {
+        const added = await api.addProject()
+        if (!added) return
+        setProjects(added.state)
+        projectId = added.project.id
+        setCurrentProjectId(projectId)
+      }
+      const task = await api.startProjectTask(projectId)
+      receiveTask(task)
+      setSessions((prev) => mergeSessions([{ id: task.sessionId, title: `理解项目 · ${task.projectName}`,
+        updatedAt: task.createdAt, projectId: task.projectId }], prev, deletedIdsRef.current))
+      await select(task.sessionId)
+      setCurrentProjectId(task.projectId)
+    } catch (err) {
+      setTaskStartError(err instanceof Error ? err.message : String(err))
+    } finally { setStartingTask(false) }
+  }, [currentProjectId, receiveTask, select, startingTask])
 
   const removeProjectById = useCallback(
     async (id: string) => {
@@ -434,25 +504,19 @@ export function App() {
   }, [currentId])
 
   const send = useCallback(
-    (text: string) => {
-      if (!currentId) return
-      dispatch({ type: 'user-sent', sessionId: currentId, text })
-      // sendMessage 这次 IPC 往返本身失败（比如主进程那边的 handler 抛错）
-      // 不代表"这轮没跑"会自然被别的事件告知——user-sent 已经乐观地把这个会话标成
-      // running，没人清掉的话它会一直卡在"正在思考…"。必须在这里显式兜底，
-      // 把它变成一条看得见的错误，并释放这个会话的 running。
-      api.sendMessage(currentId, text).catch((err: unknown) => {
-        dispatch({
-          type: 'error',
-          event: {
-            sessionId: currentId,
-            code: 'UNKNOWN',
-            message: err instanceof Error ? err.message : String(err),
-          },
-        })
+    (text: string, attachments?: ContentPart[]): Promise<boolean> => {
+      if (!currentId || pendingSends.current.has(currentId)) return Promise.resolve(false)
+      const id = currentId
+      const outcome = new Promise<boolean>((resolve) => pendingSends.current.set(id, resolve))
+      dispatch({ type: 'user-sent', sessionId: id, text, attachments })
+      void api.sendMessage(id, text, attachments).catch((err: unknown) => {
+        dispatch({ type: 'error', event: { sessionId: id, code: 'UNKNOWN',
+          message: err instanceof Error ? err.message : String(err) } })
+        settleSend(id, false)
       })
+      return outcome
     },
-    [currentId],
+    [currentId, settleSend],
   )
 
   // 编辑重发：砍掉这条及之后的历史，用新内容重新提问。
@@ -490,7 +554,7 @@ export function App() {
           // 「砍完剩什么」的真相在磁盘那边（它按 user 锚点定位，
           // 会把那一轮的工具轨迹一起带走），renderer 不自己推算。
           dispatch({ type: 'loaded', sessionId: currentId, messages: truncated })
-          send(text)
+          void send(text, chat.messages[idx]?.contentParts?.filter((p) => p.type !== 'text'))
         })
         .catch((err: unknown) => {
           dispatch({
@@ -521,6 +585,16 @@ export function App() {
   )
 
   const chat = (currentId && chats[currentId]) || emptySession()
+
+  // 侧边栏要给正在跑的那些会话显示转动指示。
+  //
+  // 从 chats 推而不是另存一份：那些桶里的 running 已经是权威真相的投影
+  // （主进程的 runner 是源头，切会话时会 reconcile 一次 —— 见 select）。
+  // 再存一份就是第三个真相，迟早和前两个分叉。
+  const runningIds = useMemo(
+    () => new Set(Object.entries(chats).filter(([, c]) => c.running).map(([id]) => id)),
+    [chats],
+  )
 
   // 会话按项目分组。分组逻辑在 main/projects.ts 里（纯函数，可单测），
   // 这里只把两份数据交给它 —— 不在组件里现算，免得同一套规则在别处再写一遍。
@@ -564,7 +638,7 @@ export function App() {
           <SettingsNav
             active={settingsSection}
             onSelect={setSettingsSection}
-            onClose={() => setShowSettings(false)}
+            onClose={() => { if (settingsPanel.current) void settingsPanel.current.requestClose(); else setShowSettings(false) }}
           />
         ) : (
           <SessionList
@@ -639,6 +713,7 @@ export function App() {
             onAddProject={() => void addProject()}
             onToggleCollapsed={(id) => void toggleCollapsed(id)}
             onSelectProject={setCurrentProjectId}
+            runningIds={runningIds}
           />
         )}
         {showSettings ? (
@@ -647,22 +722,38 @@ export function App() {
           // 那份好的设置整体冲掉（这个坑在独立窗口那版就记着，跟着搬过来）。
           settings ? (
             <SettingsPanel
+              ref={settingsPanel}
               settings={settings}
               activeSection={settingsSection}
               providers={providers ?? undefined}
+              onToggleProvider={toggleProvider}
               onSave={saveSettings}
               onRestart={restart}
+              runtimeStatus={status}
+              projectPath={projects.projects.find(p => p.id === currentProjectId)?.dir}
+              initialMemoryTab={initialMemoryTab}
+              onClose={() => setShowSettings(false)}
             />
           ) : (
             <div className="flex flex-1 items-center justify-center text-[12.5px] text-ink-3">
               读取设置中…
             </div>
           )
-        ) : (
+        ) : null}
+        <div className={showSettings ? 'hidden' : 'flex min-w-0 flex-1'}>
           <ChatWindow
             chat={chat}
             sessionId={currentId ?? ''}
             onSend={send}
+            projectTask={currentId ? projectTasks[currentId] : undefined}
+            projectName={projects.projects.find((p) => p.id === currentProjectId)?.name}
+            onStartProjectTask={() => void startProjectTask()}
+            startingTask={startingTask}
+            taskStartError={taskStartError}
+            onAcceptProjectTask={async () => { if (currentId) receiveTask(await api.acceptProjectTask(currentId)) }}
+            onExportProjectTask={() => currentId ? api.exportProjectTask(currentId) : Promise.resolve(null)}
+            capabilities={status.capabilities}
+            onOpenRetrievalSettings={() => { setInitialMemoryTab('notes'); setSettingsSection('memory'); setShowSettings(true) }}
             onCancel={cancel}
             onDecide={onDecide}
             modelCatalog={modelCatalog}
@@ -675,7 +766,7 @@ export function App() {
             onPickCliModel={pickCliModel}
             onPickPermission={pickPermission}
           />
-        )}
+        </div>
       </div>
       {/* 右键菜单挂在最外层：popover 会自己进 top layer，所以挂哪儿都不会被
           父容器的 overflow 裁掉，但放在这里更符合「它不属于某一栏」的事实。 */}

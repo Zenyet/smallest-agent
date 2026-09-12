@@ -179,7 +179,10 @@ export function ContextMenu({
       // bg-overlay、1px line-strong 边。
       //
       // **没有 gap** —— 项与项之间不留缝，这是和 gpui 版对齐的关键一条。
-      className="fixed min-w-[150px] flex-col rounded-card border border-line-strong bg-overlay p-1 text-[12px] shadow-overlay open:flex"
+      // 不写 border：shadow-overlay 的第一层已经是 0 0 0 1px var(--color-line-strong)，
+      // 再加一条 border 就是双层描边（看起来就像「outline + border」叠着）。
+      // 边界统一走 ring 是这套设计系统的约定，见 styles.css 文件头第 2 条。
+      className="fixed min-w-[150px] flex-col rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
     >
       {state.items.map((item, i) => (
         <div key={i} className="contents">

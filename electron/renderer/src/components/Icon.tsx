@@ -45,6 +45,9 @@ const PATHS: Record<string, ReactNode> = {
   // 关闭 / 删除：叉
   close: <path d="M5 5l14 14M19 5L5 19" />,
 
+  // 删除：垃圾桶，和取消编辑的叉号区分。
+  trash: <><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" /></>,
+
   // 新建：加号
   plus: <path d="M12 5v14M5 12h14" />,
 
@@ -242,4 +245,12 @@ export function Icon({
       {PATHS[name]}
     </svg>
   )
+}
+
+/** Data visualization, sharing the same SVG sizing and color conventions. */
+export function ContextRing({ percent }: { percent?: number }) {
+  return <svg aria-hidden="true" width="20" height="20" viewBox="0 0 24 24" className="context-ring">
+    <circle cx="12" cy="12" r="9" fill="none" stroke="var(--color-line-strong)" strokeWidth="2.5" />
+    {percent != null && percent > 0 && <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2.5" pathLength="100" strokeDasharray={`${percent} 100`} transform="rotate(-90 12 12)" />}
+  </svg>
 }

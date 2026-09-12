@@ -53,9 +53,12 @@ export async function acceptFiles(
   onReject?: (reason: string) => void,
 ): Promise<void> {
   for (const file of files) {
+    const extensionTypes: Record<string, string> = { md: 'text/markdown', txt: 'text/plain', csv: 'text/csv', json: 'application/json' }
+    const mimeType = (!file.type || file.type === 'application/octet-stream')
+      ? extensionTypes[file.name.split('.').at(-1)?.toLowerCase() ?? ''] ?? file.type : file.type
     // 拖进来的目录在各平台上 type 都是空串，size 也不可靠 ——
     // 走类型白名单自然就挡掉了，不需要单独判断
-    if (!ACCEPTED_TYPES.includes(file.type)) {
+    if (!ACCEPTED_TYPES.includes(mimeType)) {
       onReject?.(`不支持的类型：${file.name}`)
       continue
     }
@@ -64,11 +67,11 @@ export async function acceptFiles(
       continue
     }
     try {
-      const data = await readAsDataUrl(file)
+      const data = (await readAsDataUrl(file)).replace(/^data:[^;]*;base64,/, `data:${mimeType};base64,`)
       onAdd(
-        IMAGE_TYPES.includes(file.type)
+        IMAGE_TYPES.includes(mimeType)
           ? { type: 'image', data, filename: file.name, detail: 'auto' }
-          : { type: 'file', data, mimeType: file.type, filename: file.name },
+          : { type: 'file', data, mimeType, filename: file.name },
       )
     } catch {
       onReject?.(`读不出 ${file.name}`)
@@ -77,11 +80,13 @@ export async function acceptFiles(
 }
 
 export function AttachmentButton({
+  onFiles,
   onAdd,
   onReject,
   disabled,
 }: {
   onAdd: (attachment: ContentPart) => void
+  onFiles?: (files: File[]) => void
   /** 类型不认或体积超限时报给调用方显示 —— 这个组件不自己弹 alert。 */
   onReject?: (reason: string) => void
   disabled?: boolean
@@ -93,7 +98,8 @@ export function AttachmentButton({
     // 先清空 value 再读：选同一个文件两次时 change 不会触发（value 没变）。
     // 放在 await 之前，因为 await 之后 e.target 可能已经被 React 回收。
     e.target.value = ''
-    await acceptFiles(files, onAdd, onReject)
+    if (onFiles) onFiles(files)
+    else await acceptFiles(files, onAdd, onReject)
   }
 
   return (
@@ -111,7 +117,7 @@ export function AttachmentButton({
       <input
         ref={inputRef}
         type="file"
-        accept={ACCEPTED_TYPES.join(',')}
+        accept={[...ACCEPTED_TYPES, '.md', '.txt', '.csv', '.json'].join(',')}
         multiple
         className="hidden"
         onChange={handleChange}
@@ -125,13 +131,13 @@ export function AttachmentStrip({
   onRemove,
 }: {
   attachments: ContentPart[]
-  onRemove: (index: number) => void
+  onRemove?: (index: number) => void
 }) {
   if (attachments.length === 0) return null
   return (
     <div className="attachment-strip flex flex-wrap gap-1.5 px-1 pb-1">
       {attachments.map((att, i) => (
-        <AttachmentCard key={i} attachment={att} onRemove={() => onRemove(i)} />
+        <AttachmentCard key={i} attachment={att} onRemove={onRemove ? () => onRemove(i) : undefined} />
       ))}
     </div>
   )
@@ -142,7 +148,7 @@ function AttachmentCard({
   onRemove,
 }: {
   attachment: ContentPart
-  onRemove: () => void
+  onRemove?: () => void
 }) {
   if (attachment.type === 'text') return null
 
@@ -150,7 +156,7 @@ function AttachmentCard({
 
   // 删除键常显，不做 hover 才出现：composer 里这几张卡片本来就小，
   // 藏起来的话用户得先划过去才知道能删（触摸板上尤其别扭）。
-  const removeButton = (
+  const removeButton = onRemove ? (
     <button
       type="button"
       onClick={onRemove}
@@ -159,7 +165,7 @@ function AttachmentCard({
     >
       <Icon name="close" size={9} strokeWidth={2.6} />
     </button>
-  )
+  ) : null
 
   if (attachment.type === 'image') {
     return (
