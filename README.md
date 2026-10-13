@@ -1,170 +1,322 @@
-# smallest-agent
+# Smallest Agent
 
-用一个最小但能真正跑起来的 agent，把 18 个 AI 工程核心概念串成一条线，基于代码动手学习。
-方法论：**先跑通最小例子，再理解原理**。核心就是一个手写的 `while` 循环——每个概念都是「在循环的某个位置加一段代码」。
+Smallest Agent 是一个面向本地项目与个人知识库的 AI 助手，提供 Electron 桌面应用和命令行入口。它支持项目文件交互、笔记检索、跨会话记忆，以及通过 MCP 和 ACP 扩展工具与 Agent。
 
-## 两个入口：CLI 和桌面版
+TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 共用模型调用、工具执行和记忆模块。仓库同时包含 Rust 核心、Rust CLI 与 GPUI 桌面实现。
 
-同一套 agent 核心（`src/`），两个入口：
+[快速开始](#快速开始) · [界面与使用说明](#界面与使用说明) · [配置](#配置) · [开发与验证](#开发与验证) · [项目结构](#项目结构)
 
-| | 命令行 | 桌面版 |
-|---|---|---|
-| 启动 | `pnpm dev "你的问题"` | `pnpm dev:electron` |
-| 打包 | - | `pnpm package:mac` |
-| 入口文件 | `cli.ts` | `electron/main/index.ts` |
-| 适合 | 读代码、看 trace、跑 eval | 日常使用、多会话 |
+![Smallest Agent 桌面对话界面：左侧按项目组织会话，右侧展示工具调用、回答与模型选择](docs/screenshots/workspace.png)
 
-**建议的阅读顺序：先 CLI 再桌面版。** `cli.ts` 把整条装配线写在一个文件里，从上往下读就能看懂 agent 是怎么组装起来的；桌面版是同一条装配线拆成「启动时一次」和「每条消息一次」两段，先理解了单次版本再看拆分才不会绕。
+*界面预览：在项目中提问、查看工具轨迹与文件来源，并在输入区选择 Agent、模型和权限。本文截图由当前 Electron 渲染界面生成，使用演示项目、会话和配置数据；回答、用量及任务状态均为展示示例，不代表真实模型调用或验证结果。*
 
-桌面版的架构说明见 [`electron/README.md`](electron/README.md)。
+## 主要功能
 
-桌面版现已支持从新对话启动只读的「理解项目」任务，查看文件依据、采用成果并导出 Markdown；附件会随消息发送并保存在历史中，知识库按需初始化。使用方式与当前边界见 [第一阶段交付说明](docs/product/2026-09-09-phase-one.md)。
+- **项目与会话管理**：按项目组织对话，保存历史，并为项目会话提供文件访问能力。
+- **项目理解**：从新对话发起只读分析，生成项目说明，查看实际读取的文件依据，确认采用或导出 Markdown。
+- **模型与 Agent 接入**：配置内置模型服务或自定义端点，通过 ACP（Agent Client Protocol）连接外部 Agent。
+- **工具与技能**：通过 MCP（Model Context Protocol）发现和调用工具，按需加载 Markdown 技能；桌面端支持网页搜索与内容获取。
+- **本地知识检索**：对 Markdown 笔记进行切块、本地向量化和语义检索，回答可标注来源。
+- **记忆与上下文管理**：保存会话历史，压缩较早的消息，维护全局及项目范围的事实记忆。
+- **附件与执行反馈**：桌面端支持图片、PDF 和文本附件，展示流式回答、工具调用、权限请求及模型返回的用量信息。
+- **运行与评估**：提供重试、备用模型、磁盘缓存、答案证据核查，以及程序化和模型评分的评估工具。
+
+以上主要描述 TypeScript / Electron 版本。不同入口的工具、配置和界面能力有所区别，Rust 版本单独构建。
 
 ## 快速开始
 
+### 环境要求
+
+- Node.js 22（22.12.0 或更高版本）或 Node.js 24。
+- pnpm 10；本机需可执行 `npx`，用于启动 MCP 服务。
+- 可用的模型 API 凭据；使用外部 ACP Agent 时，需完成对应服务的安装或认证。
+
+以下命令均在仓库根目录执行。
+
+### 安装依赖
+
 ```bash
 pnpm install
-cp .env.example .env   # 填入 DeepSeek 的 key / baseURL / model
+```
 
-# 命令行
-pnpm dev "北京天气怎么样"
+### 启动桌面应用
 
-# 桌面版（首次启动后在设置面板填入 API Key）
+```bash
 pnpm dev:electron
-
-# 测试
-pnpm test              # CLI + 桌面版测试
 ```
 
-> **桌面版第一次跑报 `Error: Electron uninstall`？** pnpm 默认不执行依赖的
-> `postinstall`（安装时会提示 `Ignored build scripts`），而 Electron 靠那个脚本
-> 下载它约 300MB 的运行时二进制。`package.json` 里已经用 `pnpm.onlyBuiltDependencies`
-> 放行了它，正常 `pnpm install` 就够；万一仍然缺，手动补一次：
->
-> ```bash
-> node node_modules/electron/install.js
-> ```
+1. 打开设置，在「模型服务」中配置服务和 API Key，保存后可点击「验证连接」。
+2. 新建对话，选择模型并发送问题。
+3. 需要处理本地项目时，选择项目目录；点击「理解项目」可生成带文件依据的项目说明。
 
-## Stage 0 在做什么
+桌面界面可以在未配置 API Key 时启动，调用内置模型前需完成配置。笔记检索模型在首次检索时加载，扩展工具在后台连接。
 
-一个手写 agent 循环（`src/agent.ts`）：调模型 → 若要调工具则执行并把结果喂回 → 否则返回答案。
-工具定义不挂 `execute`，所以 SDK 把 tool-call 交还给我们自己执行——循环看得见。
+### 使用命令行
 
-## Stage 1 在做什么
+首次使用时创建配置文件；已有 `.env` 时直接编辑即可：
 
-RAG 不是新架构，只是注册表里多了一个 `search_notes` 工具——agent 循环一行没改。
-启动时读 `notes/` → 切块 → 本地 embedding → 建内存向量库；提问时模型按需调 `search_notes`，
-用余弦相似度取回最相关片段再作答。换更大的向量库（pgvector / sqlite-vec）只需替换 `src/rag/store.ts`，接口不变。
-
-> embedding 模型默认 `Xenova/multilingual-e5-small`（多语言，含中文），首次运行会从 HuggingFace 下载。
-> 想指向你真实的 Obsidian vault：设置 `NOTES_DIR=/path/to/vault`。
-
-## Stage 2 在做什么
-
-`runAgent` 开局把上次会话的 messages（存在 `.sessions/<id>.json`）塞回 system 与本轮 user 之间，跑完再存回——这就是「记忆」。
-历史超过 `MAX_CONTEXT_TOKENS`（粗估 ~4 字符/token）时，把 system 与最近 `KEEP_RECENT` 条之间的老消息用 DeepSeek 摘成一条「对话摘要」，省 token、不爆上下文。
-
-> 看记忆：`SESSION_ID=demo pnpm dev "我叫 Roy"` 再 `SESSION_ID=demo pnpm dev "我叫啥"`。
-> 看压缩：把 `MAX_CONTEXT_TOKENS` 调到很小（如 50），多聊几轮，trace/会话文件里会出现「【之前对话摘要】」。
-> 换新会话：换一个 `SESSION_ID`，或删掉 `.sessions/<id>.json`。
-
-## Stage 3 在做什么
-
-工具不再写死在代码里。`cli.ts` 启动时起一个 stdio MCP server（`mcp-server.ts`），`tools/list` 动态发现工具，转成注册表喂给 agent；`runTool` 对 MCP 工具走 `tools/call`。往 server 加个工具，agent 不改一行就能用。
-`get_weather` 已搬进 MCP server；`search_notes` 因为要进程内向量库留本地——演示「本地 + MCP 两种来源合并成一个注册表」。
-Skills 做成 `skills/*.md`：模型先 `list_skills` 看有哪些，需要时再 `get_skill` 拉全文——真实 Claude Skills 的「渐进披露」。
-
-> 试试：`pnpm dev "用 code-review 技能评审：function add(a,b){return a-b}"`，看它先 list_skills、再 get_skill、按技能要点作答。
-
-此外 `cli.ts` 还**额外连了一个我们没写的 server**——官方的 `@modelcontextprotocol/server-filesystem`（指向 `./notes`），它的 `list_directory`/`read_file` 等工具被同样合并进注册表。这证明：写一次 MCP client，即插即用任何人写的 server。
-
-> 试试：`pnpm dev "列出我 notes 目录里有哪些文件"`，看 agent 调外部 fs server 的工具读你的笔记目录。
-> 注意：fs server 对 `./notes` 有读写权限，别让它删/改东西；换目录用 `MCP_FS_DIR=/some/dir`。
-
-## Stage 4a 在做什么
-
-三层可组合的生产包装套在 `callModel` 外面（agent 循环不变）：
-- `withRetry`：429/5xx/超时等瞬时错误指数退避重试。
-- `withFallback`：主模型连续失败 → 切到 `FALLBACK_MODEL`。
-- `withCache`：按 `sha256(model+messages)` 磁盘缓存 `ModelResult`，同样的请求第二次秒回、零 token。
-
-> 看缓存：同一问题在两个干净会话各跑一次——第二次会打印「🟢 LLM 缓存命中」、几乎瞬时。
-> `LLM_CACHE=0` 关缓存；`FALLBACK_MODEL=deepseek-reasoner` 配备用模型；`MAX_RETRIES=3` 调重试。
-> 缓存只增不删（无 TTL），清空用 `rm -rf .llm-cache`。每个模型按自己的 id 各自缓存。
-
-## Stage 4b 在做什么
-
-- 降延迟：`makeCallModel(config, registry, onText)` 给了 `onText` 就走 `streamText`，最终答案逐字出现；对 retry/fallback/cache 透明（缓存命中不流式）。`STREAM=0` 关闭。
-- 降幻觉：system prompt 要求用到检索/文件内容时注明来源文件名；答案产出后，`makeVerifier`（LLM-as-Judge）拿「问题 + 工具证据 + 答案」让另一个 LLM 判断答案是否被证据支撑，不支撑就打印 ⚠️ 及问题清单。
-
-> 试试：`pnpm dev "根据我的笔记，chunking 为什么重要？"`——答案逐字出现、末尾带（来源：01-rag.md），随后一行 ✅ 核查。
-> 故意诱导幻觉：`pnpm dev "根据我的笔记，介绍一下 Rust 的所有权"`（笔记里没有）——看裁判会不会标 ⚠️。
-
-## Stage 5 在做什么
-
-给整个 agent 套评估系统：`evals/cases.ts` 放声明式用例，`runEvalSuite` 对每个用例跑 agent、按 `expect` 选打分器评分、聚合成成绩单。
-打分器两类：程序化（contains/toolUsed/cites/refuses）+ LLM-as-Judge（rubric 评分，开放式答案没法字符串匹配只能让模型评）。
-harness 与裁判都注入，所以逻辑可确定性单测；`pnpm eval` 才接真 agent。
-
-> 跑分：`pnpm eval`（需 DeepSeek key，会真跑每个用例）。结果写入 `eval-results.json`。
-> 这份结果就是「会增值的测试集 / RL 与微调的种子数据」的最小形态——改 prompt/换模型后再跑，看分数涨没涨。
-> 微调：本项目不真训练；它体现在「换 `DEEPSEEK_MODEL` 就换模型」这个可替换接口，和 eval 产出的数据资产上。
-
-## 6 阶段 × 18 概念 学习地图
-
-### 阶段 0 — 裸循环 ✅
-- [x] 提示词工程（`SYSTEM_PROMPT`）
-- [x] 上下文工程（`messages` 数组）
-- [x] 温度等参数（`config.temperature`）
-- [x] 工具调用 / 工具定义（`tools/` + `runTool`）
-- [x] 模型选型（`llm.ts`，env 驱动）
-- [x] 模型底层 / 优势局限（trace 里观察）
-
-### 阶段 1 — 真工具 + RAG ✅
-- [x] RAG（`search_notes` 工具）
-- [x] embedding / 向量检索（本地 transformers.js + 内存余弦库）
-- [x] chunking（`src/rag/chunk.ts`）
-
-### 阶段 2 — 记忆 + 上下文管理 ✅
-- [x] 记忆（JSON 文件持久化 messages，按 SESSION_ID 分会话）
-- [x] 上下文压缩（超 token 预算时 LLM 摘要老消息）
-
-### 阶段 3 — MCP + Skills ✅
-- [x] MCP（工具从 stdio MCP server 动态加载，agent 不写死工具）
-- [x] Skills（skills/*.md，经 list_skills/get_skill 渐进披露）
-
-### 阶段 4 — 生产化 ✅
-- [x] 缓存 / 省 token（withCache，磁盘缓存）
-- [x] 限流降级（withRetry 指数退避 + withFallback 切备用模型）
-- [x] 降延迟（streamText 流式打印最终答案）
-- [x] 降幻觉（引用来源 + LLM-as-Judge verifier 核查）
-
-### 阶段 5 — Eval Harness ✅
-- [x] 测试体系 / Eval（runEvalSuite：程序化 + LLM-as-Judge，`pnpm eval`）
-- [x] 微调（认知 + 可替换 llm 接口：换 `DEEPSEEK_MODEL` 即换模型；eval-results.json 作种子数据）
-
-## 结构
-
+```bash
+cp .env.example .env
 ```
-src/agent.ts   循环本体
-src/llm.ts     真实模型调用（仅此文件碰 SDK）
-src/tools/     runTool（工具执行器）
-src/config.ts  env 驱动配置
-src/trace.ts   每一轮可读输出
-src/rag/       chunk / similarity / store / embed / index（RAG 全套）
-src/memory/    store / compact / summarize（记忆 + 压缩）
-src/mcp/       MCP client（connectMcp + loadMcpTools）
-mcp-server.ts  stdio MCP server（get_weather + skills）
-skills/        技能 markdown（渐进披露）
-cli.ts         CLI 入口
-src/resilience.ts  withRetry + withFallback（限流降级）
-src/cache.ts       磁盘 LLM 缓存（省 token）
-src/verify.ts      LLM-as-Judge 证据核查（降幻觉）
-src/eval/      scorers + harness（评估打分）
-evals/cases.ts 评估用例
-eval.ts        pnpm eval 入口
 
-electron/main/      主进程：App 级装配 + IPC + agent 执行
-electron/renderer/  前端：React 聊天界面
-electron/shared/    两端共用的 IPC 频道与事件类型
+在 `.env` 中填写模型连接信息：
+
+```dotenv
+DEEPSEEK_API_KEY=your-api-key
+DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
+DEEPSEEK_MODEL=deepseek-chat
 ```
+
+运行一次对话：
+
+```bash
+pnpm dev "根据我的笔记，解释 RAG 的工作流程，并注明来源"
+```
+
+CLI 会在运行前加载本地 embedding 模型、索引笔记并连接 MCP 服务。首次运行可能需要下载模型文件。
+
+使用相同的 `SESSION_ID` 继续对话：
+
+```bash
+SESSION_ID=demo pnpm dev "这个项目使用 TypeScript"
+SESSION_ID=demo pnpm dev "这个项目使用什么语言？"
+```
+
+## 界面与使用说明
+
+### 项目工作区与对话
+
+左侧按本地项目组织会话，右侧展示当前对话的消息、工具记录和输入区域。新对话会归入当前选中的项目，便于把代码分析、资料整理和日常问答分开管理。
+
+| 界面区域 | 可以做什么 |
+| --- | --- |
+| 项目与会话列表 | 添加本地目录、切换对话，通过右键菜单重命名或删除会话 |
+| 工具调用记录 | 展开调用参数和工具返回内容，了解回答依据 |
+| 回答区域 | 阅读 Markdown、代码块与来源，查看模型返回的用量信息 |
+| 输入区 | 添加附件、切换 Agent 与模型、选择内置 Agent 的权限模式 |
+| 设置 | 管理模型连接、Agent 与工具、记忆与资料、对话偏好和运行限制 |
+
+可以从一个具体问题开始，例如：
+
+> 帮我梳理这个项目的 Agent 执行流程，指出适合开始阅读的入口文件。
+
+### 模型连接与选择
+
+![模型连接设置：管理模型服务、保存 API Key，并按需验证连接](docs/screenshots/model-connections.png)
+
+在「设置 → 模型连接」中添加服务，填写并保存凭据。自定义服务可填写兼容 API 地址和模型清单；保存服务配置后，在对话输入区选择本轮使用的模型。
+
+- **保存凭据**：保存该服务的连接配置，不等于已经验证可用。
+- **验证连接**：发送一次最小文本请求，检查当前连接；可能产生少量 API 用量，不能代替图片、PDF 或工具调用能力验证。
+- **切换模型**：在对话输入区选择已配置的服务与模型。
+- **使用外部 Agent**：在「Agent 与工具」中启用相应引擎，再回到对话中选择；外部引擎的安装、登录和权限由其自身管理。
+
+### 项目文件与权限
+
+![项目理解成果：展示分析阶段、文件依据、完整报告，以及采用和导出操作](docs/screenshots/project-overview.png)
+
+从新对话点击「选择项目并开始」，或在已选项目中点击「理解项目」。任务按阶段生成说明，最终由用户检查并验收：
+
+| 阶段 | 界面与操作 |
+| --- | --- |
+| 扫描文件 | 读取项目文件，保存本次分析使用的文件快照 |
+| 并行分析 | 分别整理项目结构、运行与验证方法、风险及待确认项 |
+| 汇总报告 | 生成完整说明，并保留实际读取的文件片段 |
+| 人工验收 | 展开「查看读取依据」和「查看完整成果」，确认后点击「采用成果」，或导出 Markdown |
+
+任务支持停止并保存进度；已停止或失败的任务可通过「继续分析」恢复。恢复时沿用原文件快照，要分析最新代码需新建任务。
+
+Electron 内置 Agent 的文件工具以会话所属的项目目录为访问范围；未选择项目的会话不加载项目文件工具。会话提供「只读」「询问」「自动」三种权限模式，默认在执行受控写操作前请求确认。
+
+「理解项目」是只读分析，不修改项目文件，也不执行报告中的命令。「采用成果」仅标记验收状态；文件依据是分析时保存的片段，不代表所有结论均已验证。
+
+TypeScript CLI 的文件工具默认访问 `./notes`，可通过 `MCP_FS_DIR` 修改。该入口直接加载 filesystem MCP 的读写工具，不使用桌面端的审批界面。
+
+### 长期记忆
+
+![长期记忆设置：按全部、当前项目或全局筛选记录，并编辑或删除已记住的内容](docs/screenshots/memory.png)
+
+在「设置 → 记忆与资料 → 长期记忆」中查看 Agent 已整理的偏好和项目约定。记录可以按「全部」「当前项目」「全局」筛选，每条记忆均可编辑或忘记；忘记后界面提供撤销操作。
+
+| 内容 | 适用范围 | 示例 |
+| --- | --- | --- |
+| 会话历史 | 当前对话 | 上一轮的问题、回答及工具调用 |
+| 全局记忆 | 跨项目、跨会话 | 「默认使用中文回答，保留代码原名」 |
+| 项目记忆 | 同一项目下的会话 | 「这个项目使用 pnpm 管理依赖」 |
+| 笔记知识库 | 通过检索按需提供资料 | RAG 学习笔记、操作手册、项目文档 |
+
+在对话中明确说「记住这个项目使用 pnpm」，可以让 Agent 记录项目约定。开启「自动整理记忆」后，系统也会按条件从对话中提取值得保留的事实，可能增加模型调用。关闭该开关后，仍可主动要求记忆；编辑记忆不会改写原对话。
+
+### 知识库
+
+`NOTES_DIR` 指定笔记目录，默认使用仓库内的 `notes/`。当前索引读取该目录下的 `.md` 文件，不递归扫描子目录；向量索引保存在内存中。
+
+```dotenv
+NOTES_DIR=/absolute/path/to/notes
+EMBEDDING_MODEL=Xenova/multilingual-e5-small
+```
+
+embedding 在本地执行。首次使用会下载模型，也可通过 `LOCAL_MODEL_PATH` 指定已准备好的本地模型根目录；下载端点可通过 `HF_ENDPOINT` 配置。桌面端修改笔记目录或检索模型后，按设置提示重启应用以重建索引。
+
+桌面端可在「设置 → 记忆与资料 → 笔记资料」选择目录。准备好资料后，可以提问「根据我的笔记，比较 RAG 与直接扩展上下文的适用场景，并注明来源」，再结合工具检索记录核对答案。
+
+### 技能与外部 Agent
+
+TypeScript 版本从 `skills/` 加载 Markdown 技能，模型通过 `list_skills` 和 `get_skill` 按需读取内容。例如：
+
+```bash
+pnpm dev "使用 code-review 技能评审：function add(a, b) { return a - b }"
+```
+
+桌面端可配置 ACP 外部 Agent 的启动命令、参数与环境变量。外部 Agent 使用自己的运行时和权限规则；本应用展示其通过 ACP 发出的内容与权限请求。
+
+### 附件
+
+桌面端支持图片、PDF、TXT、Markdown、CSV 和 JSON，也可仅发送附件。每条消息最多 10 个附件，单个不超过 20 MB，总计不超过 40 MB。图片和 PDF 的理解能力取决于选用的模型及 Agent；附件会随会话历史保存。
+
+## 配置
+
+TypeScript CLI 从环境变量和 `.env` 读取配置。常用选项如下，完整示例见 [`.env.example`](.env.example)，实际解析逻辑见 [`src/config.ts`](src/config.ts)。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `DEEPSEEK_API_KEY` | 无 | CLI 必填，模型服务 API Key |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com/v1` | 模型 API 地址 |
+| `DEEPSEEK_MODEL` | `deepseek-chat` | 主模型名称 |
+| `TEMPERATURE` | `0` | 采样温度 |
+| `MAX_TURNS` | `10` | 单次任务的最大 Agent 循环轮数 |
+| `NOTES_DIR` | `./notes` | Markdown 笔记目录 |
+| `EMBEDDING_MODEL` | `Xenova/multilingual-e5-small` | 本地 embedding 模型 |
+| `SESSION_ID` | `default` | CLI 会话标识 |
+| `SESSIONS_DIR` | `./.sessions` | CLI 会话存储目录 |
+| `MAX_CONTEXT_TOKENS` | `2000` | 触发历史摘要压缩的估算 token 阈值 |
+| `KEEP_RECENT` | `6` | 压缩时保留的最近消息条数 |
+| `AUTO_EXTRACT_FACTS` | `1` | 自动提取事实记忆；`0` 关闭 |
+| `FALLBACK_MODEL` | 与主模型相同 | 请求失败时使用的备用模型；与主模型相同时不切换 |
+| `MAX_RETRIES` | `2` | 瞬时错误的最大重试次数 |
+| `LLM_CACHE` | `1` | 模型结果缓存；`0` 关闭 |
+| `LLM_CACHE_DIR` | `./.llm-cache` | CLI 缓存目录 |
+| `STREAM` | `1` | 流式输出；`0` 关闭 |
+| `MCP_FS_DIR` | `./notes` | CLI 文件系统工具的允许目录 |
+
+Electron 的模型服务、自定义端点、检索、记忆和运行选项通过设置面板管理。桌面端按所选服务解析模型与凭据，并使用独立的会话和缓存目录；上表中的 CLI 路径默认值不适用于桌面端。
+
+### 本地数据
+
+| 数据 | TypeScript CLI | Electron |
+| --- | --- | --- |
+| 模型及运行配置 | `.env` / 环境变量 | 设置面板，持久化到 Electron `userData` |
+| 会话历史 | `.sessions/` | `userData/sessions/` |
+| 模型结果缓存 | `.llm-cache/` | `userData/llm-cache/` |
+| 事实记忆 | `~/.smallest-agent/facts.json` | 与 TypeScript CLI 共用 |
+| 评估报告 | `eval-results.json` | 通过根目录评估命令生成 |
+
+Electron 的 API Key 使用本地明文配置保存。对话、附件及工具读取的内容可能随请求发送到所选模型服务；本地 embedding 不代表整个应用离线运行。模型结果缓存当前没有自动过期机制。
+
+## 开发与验证
+
+| 命令 | 用途 |
+| --- | --- |
+| `pnpm dev "问题"` | 运行 TypeScript CLI |
+| `pnpm dev:electron` | 启动 Electron 开发环境 |
+| `pnpm typecheck` | TypeScript 类型检查 |
+| `pnpm test` | 运行核心与 Electron 测试 |
+| `pnpm test:watch` | 监听模式运行测试 |
+| `pnpm eval` | 调用真实模型运行评估用例 |
+| `pnpm build:electron` | 构建桌面应用到 `out/` |
+| `pnpm preview:electron` | 预览已构建的桌面应用 |
+
+修改代码后可运行：
+
+```bash
+pnpm typecheck
+pnpm test
+pnpm build:electron
+```
+
+测试包含真实 MCP 子进程的集成测试，需要 `npx` 和对应依赖可用。`pnpm eval` 使用真实模型与检索工具，会产生 API 用量，并将结果写入 `eval-results.json`；评估用例位于 [`evals/cases.ts`](evals/cases.ts)。
+
+### 打包桌面应用
+
+在具备对应平台构建条件的环境中运行：
+
+| 命令 | 配置的产物格式 |
+| --- | --- |
+| `pnpm package:mac` | DMG、ZIP |
+| `pnpm package:win` | NSIS 安装包、Portable |
+| `pnpm package:linux` | AppImage |
+
+产物输出至 `dist-electron/`。构建与打包配置位于 [`electron.vite.config.ts`](electron.vite.config.ts) 和 [`package.json`](package.json)。
+
+### Rust / GPUI 版本
+
+`rs/` 是独立的 Cargo workspace，包含 `smallest-agent-core`、`smallest-agent-cli` 和 `smallest-agent-ui`。需要支持 Rust 2024 edition 的工具链；GPUI 桌面端还依赖对应平台的原生构建环境，并会获取 Git 依赖。
+
+在仓库根目录准备好 `.env` 后，可运行：
+
+```bash
+# 命令行
+cargo run --manifest-path rs/Cargo.toml -p smallest-agent-cli -- "你好"
+
+# GPUI 桌面端
+cargo run --manifest-path rs/Cargo.toml -p smallest-agent-ui
+
+# 核心测试
+cargo test --manifest-path rs/Cargo.toml -p smallest-agent-core
+```
+
+Rust 版本独立解析配置，不保证与 TypeScript 版本的环境变量行为完全一致。自定义模型端点使用 `CUSTOM_BASE_URL`、`CUSTOM_API_KEY` 和 `CUSTOM_MODELS`，详见 [`.env.example`](.env.example) 与 [`rs/core/src/config.rs`](rs/core/src/config.rs)。
+
+## 项目结构
+
+```text
+smallest-agent/
+├── cli.ts                 TypeScript 命令行入口
+├── eval.ts                真实模型评估入口
+├── mcp-server.ts          内置 MCP 服务：天气与技能工具
+├── src/
+│   ├── agent.ts           Agent 循环
+│   ├── llm.ts             模型调用与流式响应
+│   ├── tools/             工具执行、检索、记忆与网页工具
+│   ├── rag/               文本切块、本地 embedding 与向量检索
+│   ├── memory/            会话存储、摘要压缩与事实记忆
+│   ├── mcp/               MCP 客户端
+│   └── eval/              评估执行与评分
+├── electron/
+│   ├── main/              主进程、Agent 运行时与 IPC
+│   ├── renderer/          React 界面
+│   └── shared/            共享类型与通信协议
+├── rs/                    Rust 核心、CLI 与 GPUI 界面
+├── skills/                Markdown 技能
+├── notes/                 示例知识库
+├── evals/                 评估用例
+├── tests/                 核心与桌面端测试
+├── docs/                  产品说明与设计记录
+└── beautiful-ui/          独立 UI 组件演示项目
+```
+
+核心执行流程为：加载配置与历史 → 调用模型 → 执行工具并回传结果 → 继续调用模型或输出答案 → 保存会话。模型调用、工具注册表和持久化通过依赖注入连接，便于扩展与测试。
+
+## 常见问题
+
+**Electron 提示安装不完整**
+
+项目已通过 `pnpm.onlyBuiltDependencies` 允许 Electron 安装脚本。如果运行时二进制仍缺失，可在安装依赖后执行：
+
+```bash
+node node_modules/electron/install.js
+```
+
+**首次检索耗时较长或模型下载失败**
+
+首次使用需要下载 embedding 模型并构建索引。检查模型下载网络，或配置 `HF_ENDPOINT` / `LOCAL_MODEL_PATH`。Electron 中的检索初始化失败只影响笔记检索，下次调用会重新尝试。
+
+**桌面端无法读取项目文件**
+
+确认会话已关联项目，目录可访问，且应用能够执行 `npx` 启动 filesystem MCP 服务。已打包的应用仍需要该外部文件服务可用。
+
+**附件已添加，但模型无法理解**
+
+附件选择与模型能力是独立的。请选择支持相应图片或 PDF 输入的模型；使用 ACP 时还需外部 Agent 声明对应能力。
+
+更多项目任务、附件和启动行为说明见[项目理解与首次体验交付说明](docs/product/2026-09-09-phase-one.md)。
