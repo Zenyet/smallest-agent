@@ -24,7 +24,9 @@ export function ownServerSpec(input: McpPathsInput): McpServerSpec {
   }
   return {
     command: input.execPath,
-    args: [join(input.resourcesPath, 'mcp-server.js')],
+    // Keep the entry beside its packaged dependencies. A script copied directly
+    // into Resources cannot resolve modules inside app.asar/node_modules.
+    args: [join(input.resourcesPath, 'app.asar', 'out', 'main', 'mcp-server.js')],
     env: { ELECTRON_RUN_AS_NODE: '1' },
   }
 }

@@ -17,10 +17,10 @@ describe('ownServerSpec', () => {
     expect(spec.args).toEqual(['tsx', '/repo/mcp-server.ts'])
   })
 
-  it('生产环境用 Electron 自带的 Node 跑编译产物', () => {
+  it('生产环境从 app.asar 中启动，让 MCP 入口能解析打包的依赖', () => {
     const spec = ownServerSpec(prod)
     expect(spec.command).toBe(prod.execPath)
-    expect(spec.args).toEqual(['/Applications/App.app/Contents/Resources/mcp-server.js'])
+    expect(spec.args).toEqual(['/Applications/App.app/Contents/Resources/app.asar/out/main/mcp-server.js'])
   })
 
   it('生产环境必须带 ELECTRON_RUN_AS_NODE，否则子进程会当成 Electron 应用再启一个窗口', () => {

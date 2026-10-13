@@ -145,12 +145,12 @@ run: async (args) => {
 ```typescript
 {
   command: process.execPath,
-  args: [join(resourcesPath, 'mcp-server.js')],
+  args: [join(resourcesPath, 'app.asar', 'out', 'main', 'mcp-server.js')],
   env: { ELECTRON_RUN_AS_NODE: '1' }
 }
 ```
 
-`ELECTRON_RUN_AS_NODE=1` 让 Electron 二进制以纯 Node 模式执行脚本，不再开窗口。
+`ELECTRON_RUN_AS_NODE=1` 让 Electron 二进制以纯 Node 模式执行脚本，不再开窗口。入口保留在 `app.asar` 内，才能解析同一归档中的 `node_modules`；单独复制到 `Resources` 会导致依赖解析失败。
 
 ### 2. skills 目录必须和 mcp-server.js 一起打包
 
@@ -161,12 +161,13 @@ const here = dirname(fileURLToPath(import.meta.url))
 const SKILLS_DIR = join(here, 'skills')
 ```
 
-所以打包时 `skills/` 必须和 `mcp-server.js` 一起放进 `resourcesPath`。见 `package.json` 的 `extraResources`：
+所以打包时将 `skills/` 放到归档内的 `out/main/skills/`，与 MCP 入口相邻。见 `package.json` 的 `build.files`：
 
 ```json
-"extraResources": [
-  { "from": "out/main/mcp-server.js", "to": "mcp-server.js" },
-  { "from": "skills", "to": "skills" }
+"files": [
+  "out/**/*",
+  "package.json",
+  { "from": "skills", "to": "out/main/skills", "filter": ["*.md"] }
 ]
 ```
 

@@ -4,11 +4,13 @@ Smallest Agent 是一个面向本地项目与个人知识库的 AI 助手，提�
 
 TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 共用模型调用、工具执行和记忆模块。仓库同时包含 Rust 核心、Rust CLI 与 GPUI 桌面实现。
 
-[快速开始](#快速开始) · [界面与使用说明](#界面与使用说明) · [配置](#配置) · [开发与验证](#开发与验证) · [项目结构](#项目结构)
+[下载安装](#下载安装) · [从源码运行](#快速开始) · [界面与使用说明](#界面与使用说明) · [配置](#配置) · [开发与验证](#开发与验证)
+
+**v0.1.0 已发布**：提供 macOS Apple Silicon 安装包。[查看 Release 与更新说明](https://github.com/Zenyet/smallest-agent/releases/tag/v0.1.0)。
 
 ![Smallest Agent 桌面对话界面：左侧按项目组织会话，右侧展示工具调用、回答与模型选择](docs/screenshots/workspace.png)
 
-*界面预览：在项目中提问、查看工具轨迹与文件来源，并在输入区选择 Agent、模型和权限。本文截图由当前 Electron 渲染界面生成，使用演示项目、会话和配置数据；回答、用量及任务状态均为展示示例，不代表真实模型调用或验证结果。*
+*界面预览：在项目中提问、查看工具轨迹与文件来源，并在输入区选择 Agent、模型和权限。截图使用演示项目、会话和配置数据；回答、用量及任务状态为展示示例。部分截图包含开发中的界面，具体功能以对应版本说明为准。*
 
 ## 主要功能
 
@@ -23,7 +25,37 @@ TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 
 
 以上主要描述 TypeScript / Electron 版本。不同入口的工具、配置和界面能力有所区别，Rust 版本单独构建。
 
+## 下载安装
+
+### macOS · v0.1.0
+
+适用于 **macOS 12 或更高版本、Apple Silicon（M 系列芯片）**。本次发布包含 Electron 桌面应用；Intel Mac、Windows、Linux 和 Rust / GPUI 版本暂无预编译安装包。
+
+| 下载 | 用途 |
+| --- | --- |
+| [DMG 安装包](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-mac-arm64.dmg) | 推荐：打开后将 Smallest Agent 拖入 Applications |
+| [ZIP 压缩包](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-mac-arm64.zip) | 解压后将 Smallest Agent.app 移入 Applications |
+| [SHA256SUMS.txt](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/SHA256SUMS.txt) | 校验下载文件的完整性 |
+
+应用内已包含 Electron 运行时，无需克隆仓库或安装项目依赖。项目文件工具仍通过外部 `npx` 启动，需要安装 Node.js 22.12+ 或 24，并确保应用能找到 `npx`；外部 ACP Agent 也需单独安装和认证。
+
+此版本使用 ad-hoc 签名，**未使用 Apple Developer ID 签名，也未经过 Apple 公证**。首次打开可能被 macOS 拦截。确认下载来源后，可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445)，在尝试打开后进入「系统设置 → 隐私与安全性 → 仍要打开」。
+
+首次启动后：
+
+1. 进入「设置 → 模型连接」，添加模型服务并保存 API Key。
+2. 点击「验证连接」，再到输入区选择模型。
+3. 直接提问，或选择本地项目，点击「理解项目」生成带文件依据的项目说明。
+
+安装包不包含 API Key 或外部 Agent 凭据。笔记检索的 embedding 模型在首次使用时下载。
+
+### v0.1.0 的功能范围
+
+本次发布基于已提交的 `main`，包括项目会话、模型连接、只读项目理解、附件、长期记忆、笔记检索及 MCP / ACP 接入。开发中的分阶段并行分析和断点继续尚未包含在 v0.1.0 中。
+
 ## 快速开始
+
+以下适用于从源码运行桌面端或 CLI；使用安装包时无需执行本节的项目安装命令。
 
 ### 环境要求
 
@@ -115,16 +147,17 @@ SESSION_ID=demo pnpm dev "这个项目使用什么语言？"
 
 ![项目理解成果：展示分析阶段、文件依据、完整报告，以及采用和导出操作](docs/screenshots/project-overview.png)
 
-从新对话点击「选择项目并开始」，或在已选项目中点击「理解项目」。任务按阶段生成说明，最终由用户检查并验收：
+*截图展示开发中的分阶段分析界面。v0.1.0 使用单次只读项目任务，支持读取依据、成果验收和 Markdown 导出。*
+
+从新对话点击「选择项目并开始」，或在已选项目中点击「理解项目」。v0.1.0 的使用流程如下：
 
 | 阶段 | 界面与操作 |
 | --- | --- |
-| 扫描文件 | 读取项目文件，保存本次分析使用的文件快照 |
-| 并行分析 | 分别整理项目结构、运行与验证方法、风险及待确认项 |
-| 汇总报告 | 生成完整说明，并保留实际读取的文件片段 |
+| 读取项目 | 使用只读工具了解项目，显示已完成的工具调用次数 |
+| 生成说明 | 整理项目结构、运行方法和核心流程，并保留实际读取的文件片段 |
 | 人工验收 | 展开「查看读取依据」和「查看完整成果」，确认后点击「采用成果」，或导出 Markdown |
 
-任务支持停止并保存进度；已停止或失败的任务可通过「继续分析」恢复。恢复时沿用原文件快照，要分析最新代码需新建任务。
+任务可停止；v0.1.0 中停止或失败后需重新发起任务，不支持断点继续。
 
 Electron 内置 Agent 的文件工具以会话所属的项目目录为访问范围；未选择项目的会话不加载项目文件工具。会话提供「只读」「询问」「自动」三种权限模式，默认在执行受控写操作前请求确认。
 
@@ -247,6 +280,16 @@ pnpm build:electron
 | `pnpm package:linux` | AppImage |
 
 产物输出至 `dist-electron/`。构建与打包配置位于 [`electron.vite.config.ts`](electron.vite.config.ts) 和 [`package.json`](package.json)。
+
+在 macOS 上构建与本次发布相同架构的安装包：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build:electron
+pnpm exec electron-builder --mac --arm64 --publish never
+```
+
+当前 macOS 配置使用 ad-hoc 签名；正式 Developer ID 分发需要自行配置证书与公证。内置 MCP 服务、依赖和技能文件均随应用打包，项目文件服务仍依赖外部 `npx`。
 
 ### Rust / GPUI 版本
 

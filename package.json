@@ -1,6 +1,6 @@
 {
   "name": "smallest-agent",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "out/main/index.js",
@@ -20,16 +20,13 @@
     },
     "files": [
       "out/**/*",
-      "package.json"
-    ],
-    "extraResources": [
-      {
-        "from": "out/main/mcp-server.js",
-        "to": "mcp-server.js"
-      },
+      "package.json",
       {
         "from": "skills",
-        "to": "skills"
+        "to": "out/main/skills",
+        "filter": [
+          "*.md"
+        ]
       }
     ],
     "asarUnpack": [
@@ -42,7 +39,8 @@
         "dmg",
         "zip"
       ],
-      "category": "public.app-category.developer-tools"
+      "category": "public.app-category.developer-tools",
+      "identity": "-"
     },
     "win": {
       "target": [
@@ -54,7 +52,8 @@
       "target": [
         "AppImage"
       ]
-    }
+    },
+    "artifactName": "Smallest-Agent-${version}-${os}-${arch}.${ext}"
   },
   "scripts": {
     "dev": "tsx cli.ts",
@@ -103,5 +102,10 @@
     "typescript": "^6.0.3",
     "vite": "^7.3.6",
     "vitest": "^4.1.9"
+  },
+  "description": "A desktop AI assistant for local projects and personal knowledge.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Zenyet/smallest-agent.git"
   }
 }
