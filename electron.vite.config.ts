@@ -36,6 +36,7 @@ export default defineConfig({
     root: resolve(root, 'electron/renderer'),
     plugins: [react(), tailwindcss()],
     build: {
+      minify: true,
       rollupOptions: {
         // 一个 renderer 入口 = 一个 BrowserWindow。设置以前是独立窗口
         // （macOS ⌘, 的原生做法），现在在主窗口右栏渲染 —— 改完 key 要回来

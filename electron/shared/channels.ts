@@ -189,7 +189,7 @@ export interface RuntimeCapability {
 }
 
 export interface RuntimeStatusEvent {
-  phase: 'embedding' | 'indexing' | 'mcp' | 'ready' | 'failed'
+  phase: 'starting' | 'embedding' | 'indexing' | 'mcp' | 'ready' | 'failed'
   detail: string
   capabilities?: RuntimeCapability[]
 }

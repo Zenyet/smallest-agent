@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from 'react'
 import { Icon } from './Icon'
+import { BrandMark } from './BrandMark'
 import type { RuntimeStatusEvent } from '../../../shared/channels'
 
 const STEPS = [
@@ -40,6 +41,14 @@ export function StartupScreen({
         >
           重启应用
         </button>
+      </div>
+    )
+  } else if (status.phase === 'starting') {
+    body = (
+      <div role="status" className="startup flex flex-1 flex-col items-center justify-center gap-3 bg-page px-8">
+        <BrandMark size={72} />
+        <h1 className="m-0 text-[17px] font-semibold tracking-tight text-ink">Smallest Agent</h1>
+        <p className="m-0 text-[12.5px] text-ink-3">{status.detail}</p>
       </div>
     )
   } else if (status.phase === 'ready') {

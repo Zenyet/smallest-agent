@@ -1,10 +1,10 @@
 import type { ProjectTask } from '../../shared/project-task'
 import type { ContentPart } from '../../../src/types'
-import { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { SessionList } from './components/SessionList'
 import { catalog as buildCatalog, DEFAULT_VENDOR, defaultModel } from '../../main/vendors'
 import { ChatWindow } from './components/ChatWindow'
-import { SettingsPanel, type SettingsPanelHandle } from './components/SettingsPanel'
+import type { SettingsPanelHandle } from './components/SettingsPanel'
 import { SettingsNav } from './components/SettingsNav'
 import { SECTIONS, type SectionId } from './settings-fields'
 import type { PermissionMode } from '../../main/providers'
@@ -21,6 +21,8 @@ import type {
   RuntimeStatusEvent,
   ProvidersView,
 } from '../../shared/channels'
+
+const SettingsPanel = lazy(() => import('./components/SettingsPanel').then((m) => ({ default: m.SettingsPanel })))
 
 // 新建的空会话在第一条消息回完之前不落盘（见 create() 的乐观更新），
 // 但任何一个会话的消息一答完，onMessageComplete 就会用磁盘列表刷新 sessions。
@@ -58,7 +60,7 @@ export function App() {
     setProjectTasks((prev) => (prev[task.sessionId]?.revision ?? -1) > task.revision
       ? prev : { ...prev, [task.sessionId]: task })
   }, [])
-  const [status, setStatus] = useState<RuntimeStatusEvent>({ phase: 'embedding', detail: '启动中…' })
+  const [status, setStatus] = useState<RuntimeStatusEvent>({ phase: 'starting', detail: '正在打开工作区…' })
   // 项目分组状态。真相在主进程的 electron-store 里（会话文件存不了这个，
   // 见 main/projects.ts 顶部），这里只是一份副本：每次写操作拿主进程返回的
   // 完整状态覆盖它，另外订阅 onProjectsChanged 接住别处（比如设置窗口将来
@@ -123,7 +125,7 @@ export function App() {
 
   // 挂载时（包括手动 reload 之后的重新挂载）主动拉一次"现在到哪了"，不能只等推送。
   // sendStatus 在主进程里只在阶段真的变化时调用一次；reload 会让这个组件从
-  // useState 的初始值 { phase: 'embedding' } 重新开始，但主进程早就跑到 'ready' 了，
+  // useState 的初始值 { phase: 'starting' } 重新开始，但主进程早就跑到 'ready' 了，
   // 而且不会再发第二次 'ready' 事件——单靠订阅（上面那个 effect）永远等不到它。
   // getRuntimeStatus 是"拉"，随时问都能拿到当下的真相，用它把这个空当补上。
   useEffect(() => {
@@ -721,6 +723,7 @@ export function App() {
           // 播种一次，提前挂载等于用空对象播种，用户一改别的字段就会把磁盘上
           // 那份好的设置整体冲掉（这个坑在独立窗口那版就记着，跟着搬过来）。
           settings ? (
+            <Suspense fallback={<div className="flex flex-1 items-center justify-center text-[12.5px] text-ink-3">正在打开设置…</div>}>
             <SettingsPanel
               ref={settingsPanel}
               settings={settings}
@@ -734,6 +737,7 @@ export function App() {
               initialMemoryTab={initialMemoryTab}
               onClose={() => setShowSettings(false)}
             />
+            </Suspense>
           ) : (
             <div className="flex flex-1 items-center justify-center text-[12.5px] text-ink-3">
               读取设置中…

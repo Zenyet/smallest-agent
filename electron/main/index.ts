@@ -7,9 +7,10 @@ import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
 import { createSettingsStatus, validateSettingsUpdate } from './settings-update'
 import { ownServerSpec } from './mcp-paths'
-import { createFsToolsPool } from './fs-tools'
-import { createRuntime, type AgentRuntime } from './agent-runtime'
-import { setupIpcHandlers, setupProviderHandlers } from './ipc-handlers'
+import type { AgentRuntime } from './agent-runtime'
+import type { setupIpcHandlers } from './ipc-handlers'
+import { setupProviderHandlers } from './provider-ipc'
+import { traceStartup } from './startup-timing'
 import { migrateLegacyFacts } from './facts-store'
 import { createApprovalGate } from './approval'
 import { toErrorEvent } from './errors'
@@ -20,6 +21,9 @@ import type { RuntimeStatusEvent } from '../shared/channels'
 // ESM 主进程没有 __dirname，用 import.meta.url 还原（和 mcp-server.ts 同样的手法）
 const here = dirname(fileURLToPath(import.meta.url))
 const isDev = !app.isPackaged
+
+traceStartup('main-entry')
+Menu.setApplicationMenu(null)
 
 // 首次导航等待的上限：正常情况下（dev server / 本地文件）远用不到这么久，
 // 这只是防止"从未 finish 也从未 fail"的极端情况把启动挂死。
@@ -73,6 +77,9 @@ function createWindow(): BrowserWindow {
     width: 1100,
     height: 760,
     minWidth: 820,
+    ...(isDev || process.platform === 'linux' ? {
+      icon: isDev ? join(here, '../../build/icon.png') : join(process.resourcesPath, 'icon.png'),
+    } : {}),
     // 跟 styles.css 的 --color-page 一致。窗口在 renderer 画出来之前先显示这个底色，
     // 不一致的话启动瞬间会闪一下别的颜色。（之前这里是 #05070C，是移植参考站
     // token 之前的旧调色板，一直没跟着改。）
@@ -130,7 +137,10 @@ function createWindow(): BrowserWindow {
   // show: false 的配套：首帧就绪就显示。
   // once 而不是 on —— 这个事件在每次导航后都会再发一次（dev 下改代码热重载
   // 就是一次导航），只需要第一次那回。
-  win.once('ready-to-show', () => win.show())
+  win.once('ready-to-show', () => {
+    traceStartup('window-visible')
+    win.show()
+  })
 
   // 开发时连 vite dev server（热重载），生产时加载构建产物
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -152,6 +162,8 @@ function broadcast(channel: string, payload: unknown): void {
 }
 
 app.whenReady().then(async () => {
+  traceStartup('app-ready')
+  if (isDev && process.platform === 'darwin') app.dock?.setIcon(join(here, '../../build/icon.png'))
   ipcMain.handle(CH.ping, () => 'pong')
 
   // 记忆从旧路径（userData/memory.json）迁到共享的 ~/.smallest-agent/facts.json。
@@ -194,7 +206,7 @@ app.whenReady().then(async () => {
   // 但 renderer 可能在状态已经变了之后才去问（reload 之后的重新挂载就是这样）——
   // 推送错过了就永远错过，这个变量让 CH.getRuntimeStatus 能随时"拉"到当下的真相，
   // 不用假设 renderer 一直在场、从没错过任何一次 send。
-  let lastStatus: RuntimeStatusEvent = { phase: 'embedding', detail: '启动中…' }
+  let lastStatus: RuntimeStatusEvent = { phase: 'starting', detail: '正在打开工作区…' }
   const sendStatus = (status: RuntimeStatusEvent) => {
     lastStatus = status
     // 广播而不是只发主窗口：设置窗口也要知道 phase —— 它在 phase 落定
@@ -208,21 +220,12 @@ app.whenReady().then(async () => {
   // 这个 handler 必须一直在，不能等到 setupIpcHandlers 才出现。
   ipcMain.handle(CH.getRuntimeStatus, () => lastStatus)
 
-  // loadConfig 之类的同步异常几乎瞬间抛出，可能比 renderer 的 JS bundle
-  // 加载执行、React 挂载、useEffect 订阅 onRuntimeStatus 更快 —— 这种情况下
-  // webContents.send 发出的第一条状态事件会因为对侧还没 ipcRenderer.on
-  // 监听而直接被 Electron 丢弃（不会排队），状态栏永远停在初始的「启动中…」。
-  // 等页面首次加载完成再往下走，保证 renderer 一定已经订阅上。
-  // （若这次导航从未成功——dev server 没起来、生产包路径错了——waitForInitialLoad
-  // 也会在 did-fail-load / 超时后放行，不会让下面的 try/catch 永远够不到。）
-  await waitForInitialLoad(win)
-
-  // ready-to-show 的兜底：那个事件在首次导航失败时不会发（dev server 没起来、
-  // 生产包路径错了），而 show:false 意味着窗口会**永远不出现** —— 用户看到的是
-  // 应用启动了却没有界面，连报错都看不见。waitForInitialLoad 不管成功失败都会
-  // 放行（见它的文件头），在这里补一次 show 兜住那条路径。
-  // show() 是幂等的，正常路径上 ready-to-show 已经显示过，这次调用无副作用。
-  if (!win.isDestroyed()) win.show()
+  // Renderer navigation and service loading run concurrently. The status snapshot
+  // above makes early completion safe: a renderer that missed a push can pull it.
+  void waitForInitialLoad(win).then(() => {
+    traceStartup('renderer-loaded')
+    if (!win.isDestroyed()) win.show()
+  })
 
   let runtime: AgentRuntime | undefined
   let quitting = false
@@ -266,6 +269,11 @@ app.whenReady().then(async () => {
   const settingsStatus = createSettingsStatus(process.env, startupSettings)
   ipcMain.handle(CH.getSettingsStatus, () => settingsStatus(getSettings()))
   try {
+    // Keep Agent/AI SDK/MCP/workflow modules off the path to creating the window.
+    const [{ createRuntime }, { createFsToolsPool }, { setupIpcHandlers }] = await Promise.all([
+      import('./agent-runtime'), import('./fs-tools'), import('./ipc-handlers'),
+    ])
+    traceStartup('services-loaded')
     const paths = {
       sessionsDir: join(app.getPath('userData'), 'sessions'),
       cacheDir: join(app.getPath('userData'), 'llm-cache'),
@@ -310,6 +318,7 @@ app.whenReady().then(async () => {
     // 所以用一个可变引用把它接上，而不是把注册挪到这儿
     runnerRef = runnerInterface
     handlersReady = true
+    traceStartup('runtime-ready')
     sendStatus(runtimeStatus)
 
     // 健康路径的重启：只允许在没有活跃工作（运行中的 turn 或待审批）时调用。
@@ -352,7 +361,6 @@ app.whenReady().then(async () => {
     // try 块最前面就可能同步抛出 —— 这里必须兜底，否则渲染进程永远停在「启动中…」，
     // 且这个异常会变成主进程里看不见的 unhandled rejection（打包后更是无从排查）。
     const failure = toErrorEvent('default', err)
-    sendStatus({ phase: 'failed', detail: failure.message })
 
     // 走到这里说明 setupIpcHandlers 没跑过，那些 handler 都还没注册。
     // 不补上的话，renderer 侧对应的 ipcRenderer.invoke 会因为
@@ -387,6 +395,7 @@ app.whenReady().then(async () => {
       app.relaunch()
       app.quit()
     })
+    sendStatus({ phase: 'failed', detail: failure.message })
   }
 
   app.on('activate', () => {

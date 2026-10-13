@@ -6,6 +6,12 @@ import { StartupScreen } from '../../electron/renderer/src/components/StartupScr
 afterEach(cleanup)
 
 describe('StartupScreen', () => {
+  it('打开工作区时显示品牌，不把按需加载的模型误报为启动前置步骤', () => {
+    render(<StartupScreen status={{ phase: 'starting', detail: '正在打开工作区…' }} onRetry={() => {}} />)
+    expect(screen.getByRole('status').textContent).toContain('Smallest Agent')
+    expect(screen.getByText('正在打开工作区…')).toBeTruthy()
+    expect(screen.queryByText(/首次运行需要下载/)).toBeNull()
+  })
   it('显示当前阶段的说明文字', () => {
     render(<StartupScreen status={{ phase: 'embedding', detail: '正在加载 embedding 模型…' }} onRetry={() => {}} />)
     expect(screen.getByText(/正在加载 embedding 模型/)).toBeTruthy()

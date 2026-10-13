@@ -1,4 +1,5 @@
 import { Icon } from './Icon'
+import { BrandMark } from './BrandMark'
 import type { SessionGroup } from '../../../shared/channels'
 
 // 侧边栏：顶部动作行（新对话）→「项目」区标签 → 项目行（可折叠）→ 其下嵌套的会话行。
@@ -66,6 +67,10 @@ export function SessionList({
           齿轮挤在右端剩下的空间里。
           齿轮本身要标 no-drag，否则它落在 drag 区里点不动（拖拽区会吃掉点击）。 */}
       <div className="h-7 shrink-0 [-webkit-app-region:drag]" />
+      <div className="mb-2 flex items-center gap-2 px-1.5 py-1">
+        <BrandMark size={28} />
+        <span className="text-[12px] font-semibold tracking-tight text-ink">Smallest Agent</span>
+      </div>
 
       {/* 新对话：跟下面的项目行/会话行同一套外观 —— 无默认背景、文字左对齐、
           只有 hover 时才出背景。以前它是 bg-ink 的实心按钮，在一个全是 hover 态

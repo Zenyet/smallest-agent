@@ -32,6 +32,7 @@ module.exports = {
   compression: 'maximum',
   electronLanguages: ['en-US', 'zh-CN', 'zh-TW'],
   mac: {
+    icon: 'build/icon.icns',
     files: filesFor('darwin'),
     electronLanguages: ['en', 'zh_CN', 'zh_TW'],
     target: ['dmg', 'zip'],
@@ -40,7 +41,12 @@ module.exports = {
   },
   // Smaller download than UDZO/ULFO, at the cost of slower image creation.
   dmg: { format: 'UDBZ' },
-  win: { files: filesFor('win32'), target: ['nsis', 'portable'] },
-  linux: { files: filesFor('linux'), target: ['AppImage'] },
+  win: { icon: 'build/icon.ico', files: filesFor('win32'), target: ['nsis', 'portable'] },
+  linux: {
+    icon: 'build/icon.png',
+    files: filesFor('linux'),
+    extraResources: [{ from: 'build/icon.png', to: 'icon.png' }],
+    target: ['AppImage'],
+  },
   artifactName: 'Smallest-Agent-${version}-${os}-${arch}.${ext}',
 }

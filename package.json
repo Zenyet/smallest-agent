@@ -23,6 +23,8 @@
     "package:mac": "electron-vite build && electron-builder --mac",
     "package:win": "electron-vite build && electron-builder --win",
     "package:linux": "electron-vite build && electron-builder --linux",
+    "build:icons": "node scripts/build-icons.mjs",
+    "measure:startup": "node scripts/measure-startup.mjs",
     "check:package": "node scripts/check-package.mjs"
   },
   "dependencies": {
