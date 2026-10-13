@@ -11,50 +11,6 @@
       "electron-winstaller"
     ]
   },
-  "build": {
-    "appId": "com.smallest-agent.app",
-    "productName": "Smallest Agent",
-    "directories": {
-      "output": "dist-electron",
-      "buildResources": "build"
-    },
-    "files": [
-      "out/**/*",
-      "package.json",
-      {
-        "from": "skills",
-        "to": "out/main/skills",
-        "filter": [
-          "*.md"
-        ]
-      }
-    ],
-    "asarUnpack": [
-      "**/node_modules/@huggingface/**",
-      "**/node_modules/onnxruntime-node/**",
-      "**/node_modules/sharp/**"
-    ],
-    "mac": {
-      "target": [
-        "dmg",
-        "zip"
-      ],
-      "category": "public.app-category.developer-tools",
-      "identity": "-"
-    },
-    "win": {
-      "target": [
-        "nsis",
-        "portable"
-      ]
-    },
-    "linux": {
-      "target": [
-        "AppImage"
-      ]
-    },
-    "artifactName": "Smallest-Agent-${version}-${os}-${arch}.${ext}"
-  },
   "scripts": {
     "dev": "tsx cli.ts",
     "eval": "tsx eval.ts",
@@ -66,42 +22,43 @@
     "preview:electron": "electron-vite preview",
     "package:mac": "electron-vite build && electron-builder --mac",
     "package:win": "electron-vite build && electron-builder --win",
-    "package:linux": "electron-vite build && electron-builder --linux"
+    "package:linux": "electron-vite build && electron-builder --linux",
+    "check:package": "node scripts/check-package.mjs"
   },
   "dependencies": {
+    "@huggingface/transformers": "4.2.0"
+  },
+  "devDependencies": {
     "@agentclientprotocol/sdk": "1.4.0",
     "@ai-sdk/openai": "2.0.122",
     "@ai-sdk/openai-compatible": "^2.0.50",
     "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@fontsource/inter": "^5.3.0",
-    "@huggingface/transformers": "^4.2.0",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@modelcontextprotocol/server-filesystem": "^2026.1.14",
-    "ai": "^6.0.205",
-    "dotenv": "^17.4.2",
-    "electron-store": "^11.0.2",
-    "react-markdown": "^10.1.0",
-    "shiki": "^4.4.3",
-    "zod": "^4.4.3"
-  },
-  "devDependencies": {
     "@tailwindcss/vite": "^4.3.3",
     "@testing-library/react": "^16.3.2",
     "@types/node": "^25.9.3",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitejs/plugin-react": "^5.2.0",
+    "ai": "^6.0.205",
+    "dotenv": "^17.4.2",
     "electron": "^43.3.0",
     "electron-builder": "^26.15.3",
+    "electron-store": "^11.0.2",
     "electron-vite": "^5.0.0",
     "jsdom": "^30.0.1",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
+    "react-markdown": "^10.1.0",
+    "shiki": "^4.4.3",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.22.4",
     "typescript": "^6.0.3",
     "vite": "^7.3.6",
-    "vitest": "^4.1.9"
+    "vitest": "^4.1.9",
+    "zod": "^4.4.3"
   },
   "description": "A desktop AI assistant for local projects and personal knowledge.",
   "repository": {

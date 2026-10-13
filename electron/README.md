@@ -150,7 +150,7 @@ run: async (args) => {
 }
 ```
 
-`ELECTRON_RUN_AS_NODE=1` 让 Electron 二进制以纯 Node 模式执行脚本，不再开窗口。入口保留在 `app.asar` 内，才能解析同一归档中的 `node_modules`；单独复制到 `Resources` 会导致依赖解析失败。
+`ELECTRON_RUN_AS_NODE=1` 让 Electron 二进制以纯 Node 模式执行脚本，不再开窗口。入口保留在 `app.asar` 内，与编译出的共享 chunk、技能文件和外置原生依赖保持相对路径。纯 JavaScript 依赖由 Vite 打入产物，不再额外复制整份 `node_modules`。
 
 ### 2. skills 目录必须和 mcp-server.js 一起打包
 
@@ -161,7 +161,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const SKILLS_DIR = join(here, 'skills')
 ```
 
-所以打包时将 `skills/` 放到归档内的 `out/main/skills/`，与 MCP 入口相邻。见 `package.json` 的 `build.files`：
+所以打包时将 `skills/` 放到归档内的 `out/main/skills/`，与 MCP 入口相邻。见 `electron-builder.cjs` 的 `filesFor()`（以下省略排除规则）：
 
 ```json
 "files": [

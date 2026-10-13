@@ -279,7 +279,7 @@ pnpm build:electron
 | `pnpm package:win` | NSIS 安装包、Portable |
 | `pnpm package:linux` | AppImage |
 
-产物输出至 `dist-electron/`。构建与打包配置位于 [`electron.vite.config.ts`](electron.vite.config.ts) 和 [`package.json`](package.json)。
+产物输出至 `dist-electron/`。构建配置位于 [`electron.vite.config.ts`](electron.vite.config.ts)，打包配置位于 [`electron-builder.cjs`](electron-builder.cjs)。
 
 在 macOS 上构建与本次发布相同架构的安装包：
 
@@ -290,6 +290,20 @@ pnpm exec electron-builder --mac --arm64 --publish never
 ```
 
 当前 macOS 配置使用 ad-hoc 签名；正式 Developer ID 分发需要自行配置证书与公证。内置 MCP 服务、依赖和技能文件均随应用打包，项目文件服务仍依赖外部 `npx`。
+
+打包体积控制：纯 JavaScript 依赖放在 `devDependencies`，由 Vite 编译、tree-shake 和压缩进主进程或前端，避免再复制完整依赖目录。`dependencies` 仅保留需要原生库的 Transformers；它固定为 4.2.0，Node 入口使用本地 CPU 推理，所以排除独立的 `onnxruntime-web` 浏览器/WASM 发行文件。升级 Transformers 后必须重新检查入口依赖并验证本地推理。ONNX 原生库按**目标平台与架构**保留；模型缓存、源码映射和开发文件不进包，Electron 仅保留英文、简体中文和繁体中文资源。DMG 使用 UDBZ 压缩，换取更小的下载体积。
+
+修改依赖分类后先运行 `pnpm install --frozen-lockfile`，同步 pnpm 的已安装依赖信息，再打包。可用以下命令验证本机架构的 macOS 产物：
+
+```bash
+pnpm check:package "dist-electron/mac-arm64/Smallest Agent.app"
+
+# 可选：传入已有模型目录，额外验证真实离线 embedding（不下载模型）
+pnpm check:package "dist-electron/mac-arm64/Smallest Agent.app" \
+  node_modules/@huggingface/transformers/.cache/Xenova/multilingual-e5-small
+```
+
+检查会验证归档白名单、原生库架构、Transformers 的 ESM/CJS 入口、ONNX 实际推理、sharp，以及打包后的 MCP 子进程与技能文件。模型仍在用户首次使用知识库时按原逻辑加载，不会为了缩包移除本地检索功能。
 
 ### Rust / GPUI 版本
 
