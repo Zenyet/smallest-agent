@@ -1,0 +1,98 @@
+name: Windows package
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Optional existing Release tag to upload verified Windows packages (e.g. v0.1.0)'
+        type: string
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore: ['**/*.md', 'rs/**', 'beautiful-ui/**', '.beautiful-ui-src/**']
+  pull_request:
+    paths-ignore: ['**/*.md', 'rs/**', 'beautiful-ui/**', '.beautiful-ui-src/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  package:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.33.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - name: Build Windows x64 installer and portable executable
+        run: pnpm package:win
+      - name: Check packaged native dependencies and MCP
+        run: pnpm check:package dist-electron/win-unpacked
+      - name: Install and smoke test with spaces and Unicode in the path
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem dist-electron/*-win-x64-Setup.exe
+          if (@($installer).Count -ne 1) { throw 'Expected exactly one NSIS installer' }
+          $installDir = Join-Path $env:RUNNER_TEMP 'Smallest 安装测试'
+          $process = Start-Process $installer.FullName -ArgumentList "/S /D=$installDir" -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Installer failed: $($process.ExitCode)" }
+          pnpm check:package "$installDir"
+          if ($LASTEXITCODE -ne 0) { throw 'Installed runtime smoke test failed' }
+          pnpm measure:startup "$installDir/Smallest Agent.exe" 1
+          if ($LASTEXITCODE -ne 0) { throw 'Installed application failed to become usable' }
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem dist-electron/*-win-x64-*.exe | Sort-Object Name)
+          if ($files.Count -ne 2) { throw 'Expected separate Setup and Portable executables' }
+          $lines = $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant())  $($_.Name)" }
+          $lines | Set-Content dist-electron/SHA256SUMS-windows.txt -Encoding utf8NoBOM
+          $env:GITHUB_SHA | Set-Content dist-electron/BUILD-COMMIT-windows.txt -Encoding utf8NoBOM
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Smallest-Agent-windows-x64
+          path: |
+            dist-electron/*-win-x64-Setup.exe
+            dist-electron/*-win-x64-Portable.exe
+            dist-electron/SHA256SUMS-windows.txt
+            dist-electron/BUILD-COMMIT-windows.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+  publish:
+    needs: package
+    if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: Smallest-Agent-windows-x64
+          path: release-windows
+      - name: Upload verified Windows packages to the existing Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          test "$RELEASE_TAG" = "v$version"
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" release-windows/* --clobber --repo "$GITHUB_REPOSITORY"

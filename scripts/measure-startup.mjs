@@ -1,7 +1,8 @@
 // Measures a real Electron process with an empty profile, without API keys.
 // Usage: node scripts/measure-startup.mjs [path/to/packaged/executable] [runs=3]
 import { spawn } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -10,20 +11,30 @@ import { performance } from 'node:perf_hooks'
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const executable = process.argv[2] ? resolve(process.argv[2])
-  : join(root, 'node_modules/electron/dist/Electron.app/Contents/MacOS/Electron')
+  : createRequire(import.meta.url)('electron')
 const runs = Number(process.argv[3] ?? 3)
 if (!Number.isInteger(runs) || runs < 1 || runs > 100) throw Error('runs must be an integer from 1 to 100')
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 const samples = []
 for (let run = 0; run < runs; run++) {
   const temp = await mkdtemp(join(tmpdir(), 'smallest-startup-'))
+  const appData = join(temp, 'AppData', 'Roaming')
+  const localAppData = join(temp, 'AppData', 'Local')
+  await Promise.all([mkdir(appData, { recursive: true }), mkdir(localAppData, { recursive: true })])
+  // Retain Windows loader/command lookup variables, but no API credentials or
+  // real user profile. The renderer and settings store use the temporary profile.
+  const systemEnv = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    ['PATH', 'SYSTEMROOT', 'WINDIR', 'COMSPEC', 'PATHEXT', 'SYSTEMDRIVE'].includes(key.toUpperCase())))
   const start = performance.now()
   const child = spawn(executable, [
     '--inspect=0', `--user-data-dir=${join(temp, 'profile')}`,
     ...(!process.argv[2] ? [join(root, 'out/main/index.js')] : []),
   ], {
     cwd: temp,
-    env: { HOME: temp, TMPDIR: tmpdir(), PATH: process.env.PATH, LANG: 'en_US.UTF-8', SMALLEST_STARTUP_TRACE: '1' },
+    env: {
+      ...systemEnv, HOME: temp, USERPROFILE: temp, APPDATA: appData, LOCALAPPDATA: localAppData,
+      TMPDIR: tmpdir(), TEMP: tmpdir(), TMP: tmpdir(), LANG: 'en_US.UTF-8', SMALLEST_STARTUP_TRACE: '1',
+    },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = '', socket, seq = 0
@@ -101,7 +112,7 @@ for (let run = 0; run < runs; run++) {
       await Promise.race([once(child, 'exit'), sleep(1000)])
       if (child.exitCode === null) child.kill('SIGKILL')
     }
-    await rm(temp, { recursive: true, force: true })
+    await rm(temp, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 }
 const median = (key) => [...samples].sort((a,b) => a[key]-b[key])[Math.floor(samples.length/2)][key]

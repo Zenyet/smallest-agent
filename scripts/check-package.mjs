@@ -1,20 +1,35 @@
-// macOS release smoke test: uses the shipped Electron and dependencies, offline.
-// node scripts/check-package.mjs path/to/App.app [path/to/cached/embedding-model]
+// Release smoke test: uses the shipped Electron and dependencies, offline.
+// node scripts/check-package.mjs path/to/App.app-or-unpacked-directory [model-directory]
+// Cross-builds: --archive-only --platform=win32 --arch=x64
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, openSync, readSync, closeSync, rmSync } from 'node:fs'
+import { once } from 'node:events'
+import { existsSync, mkdtempSync, openSync, readSync, closeSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { parseArgs } from 'node:util'
 
-const runtime = process.argv[2] === '--runtime'
-const appPath = process.argv[runtime ? 3 : 2]
-assert(appPath, 'Usage: node scripts/check-package.mjs App.app [embedding-model-directory]')
-const resources = join(resolve(appPath), 'Contents', 'Resources')
+const { values, positionals } = parseArgs({
+  allowPositionals: true,
+  options: {
+    runtime: { type: 'boolean' },
+    'archive-only': { type: 'boolean' },
+    platform: { type: 'string', default: process.platform },
+    arch: { type: 'string', default: process.arch },
+  },
+})
+const runtime = values.runtime
+const [appPath, modelDir] = positionals
+assert(appPath, 'Usage: node scripts/check-package.mjs App.app-or-unpacked-directory [model-directory] [--archive-only --platform=win32 --arch=x64]')
+const platform = values.platform
+const arch = values.arch
+assert(['darwin', 'win32', 'linux'].includes(platform), `Unsupported platform: ${platform}`)
+assert(['x64', 'arm64'].includes(arch), `Unsupported architecture: ${arch}`)
+const resources = join(resolve(appPath), ...(platform === 'darwin' ? ['Contents', 'Resources'] : ['resources']))
 const archive = join(resources, 'app.asar')
-const modelDir = process.argv[runtime ? 4 : 3]
 
 if (!runtime) {
   // Read only the ASAR header, so an accidentally bundled model cannot exhaust RAM.
@@ -35,8 +50,11 @@ if (!runtime) {
       const path = `${parent}/${name}`
       assert(!/^\.env(?:\.|$)/.test(name) && name !== '.cache', `Unexpected private/cache file: ${path}`)
       assert(!path.endsWith('.map'), `Unexpected source map: ${path}`)
+      if (entry.unpacked && !entry.files) {
+        assert(existsSync(join(`${archive}.unpacked`, path.slice(1))), `Missing unpacked file: ${path}`)
+      }
       if (path.includes('/onnxruntime-node/bin/napi-') && !entry.files) {
-        assert(path.includes(`/darwin/${process.arch}/`), `Foreign native library: ${path}`)
+        assert(path.includes(`/${platform}/${arch}/`), `Foreign native library: ${path}`)
       }
       if (entry.files) audit(entry.files, path)
     }
@@ -46,10 +64,26 @@ if (!runtime) {
   for (const name of ['onnxruntime-web', 'shiki', '@shikijs', '@fontsource', '@fontsource-variable', 'react-markdown']) {
     assert(!modules[name], `Unexpected build-only dependency: ${name}`)
   }
+  const images = modules['@img']?.files ?? {}
+  const sharpPlatforms = platform === 'linux' ? ['linux', 'linuxmusl'] : [platform]
+  assert(sharpPlatforms.some(os => images[`sharp-${os}-${arch}`]), 'Missing target sharp native package')
+  for (const name of Object.keys(images).filter(name => name.startsWith('sharp-'))) {
+    assert(sharpPlatforms.some(os => name === `sharp-${os}-${arch}` || name === `sharp-libvips-${os}-${arch}`), `Foreign sharp package: ${name}`)
+  }
+  const onnxVersions = modules['onnxruntime-node']?.files?.bin?.files ?? {}
+  assert(Object.values(onnxVersions).some(entry => entry.files?.[platform]?.files?.[arch]?.files?.['onnxruntime_binding.node']), 'Missing target ONNX binding')
   console.log('PASS: archive allowlist, caches, native architecture and build-only dependencies')
+  if (values['archive-only']) {
+    console.log(`Archive-only check (${platform}/${arch}); runtime execution was NOT tested`)
+    process.exit(0)
+  }
+  assert(platform === process.platform && arch === process.arch, 'Runtime checks must run on the target OS and architecture; use --archive-only for cross-builds')
   const cwd = mkdtempSync(join(tmpdir(), 'smallest-agent-package-'))
   try {
-    const executable = join(resolve(appPath), 'Contents', 'MacOS', basename(appPath, '.app'))
+    const executable = platform === 'darwin'
+      ? join(resolve(appPath), 'Contents', 'MacOS', basename(appPath, '.app'))
+      : join(resolve(appPath), platform === 'win32' ? 'Smallest Agent.exe' : 'smallest-agent')
+    assert(existsSync(executable), `Missing packaged executable: ${executable}`)
     const args = [fileURLToPath(import.meta.url), '--runtime', resolve(appPath)]
     if (modelDir) args.push(resolve(modelDir))
     const result = spawnSync(executable, args, {
@@ -61,7 +95,7 @@ if (!runtime) {
     if (result.error) throw result.error
     assert.equal(result.status, 0, `Packaged runtime failed (${result.signal ?? result.status})`)
   } finally {
-    rmSync(cwd, { recursive: true, force: true })
+    rmSync(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 })
   }
 } else {
   assert(process.versions.electron, 'The smoke test must run in the packaged Electron')
@@ -86,7 +120,7 @@ if (!runtime) {
 
   // Use the wire protocol so the test itself needs no copy of the bundled SDK.
   const child = spawn(process.execPath, [join(archive, 'out/main/mcp-server.js')], {
-    env: { ELECTRON_RUN_AS_NODE: '1' },
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['pipe', 'pipe', 'inherit'],
   })
   const lines = createInterface({ input: child.stdout })
@@ -118,7 +152,11 @@ if (!runtime) {
     clearTimeout(timeout)
     lines.close()
     child.stdin.end()
-    child.kill()
+    if (child.exitCode === null && child.signalCode === null) {
+      const exited = once(child, 'exit')
+      child.kill()
+      await exited
+    }
   }
   console.log('PASS: packaged MCP subprocess and skill files')
 

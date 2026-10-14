@@ -6,7 +6,7 @@ TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 
 
 [下载安装](#下载安装) · [从源码运行](#快速开始) · [界面与使用说明](#界面与使用说明) · [配置](#配置) · [开发与验证](#开发与验证)
 
-**v0.1.0 已发布**：提供 macOS Apple Silicon 安装包。[查看 Release 与更新说明](https://github.com/Zenyet/smallest-agent/releases/tag/v0.1.0)。
+**v0.1.0 已发布**：提供 macOS Apple Silicon 和 Windows x64 安装包。[查看 Release 与更新说明](https://github.com/Zenyet/smallest-agent/releases/tag/v0.1.0)。
 
 ![Smallest Agent 桌面对话界面：左侧按项目组织会话，右侧展示工具调用、回答与模型选择](docs/screenshots/workspace.png)
 
@@ -29,7 +29,7 @@ TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 
 
 ### macOS · v0.1.0
 
-适用于 **macOS 12 或更高版本、Apple Silicon（M 系列芯片）**。本次发布包含 Electron 桌面应用；Intel Mac、Windows、Linux 和 Rust / GPUI 版本暂无预编译安装包。
+适用于 **macOS 12 或更高版本、Apple Silicon（M 系列芯片）**。本次发布包含 Electron 桌面应用；Intel Mac、Linux 和 Rust / GPUI 版本暂无预编译安装包。
 
 | 下载 | 用途 |
 | --- | --- |
@@ -40,6 +40,20 @@ TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 
 应用内已包含 Electron 运行时，无需克隆仓库或安装项目依赖。项目文件工具仍通过外部 `npx` 启动，需要安装 Node.js 22.12+ 或 24，并确保应用能找到 `npx`；外部 ACP Agent 也需单独安装和认证。
 
 此版本使用 ad-hoc 签名，**未使用 Apple Developer ID 签名，也未经过 Apple 公证**。首次打开可能被 macOS 拦截。确认下载来源后，可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445)，在尝试打开后进入「系统设置 → 隐私与安全性 → 仍要打开」。
+
+### Windows · v0.1.0
+
+适用于 **Windows 10/11 x64**，沿用新的应用图标。
+
+| 下载 | 用途 |
+| --- | --- |
+| [Setup 安装版](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-win-x64-Setup.exe) | 可选择安装目录，创建开始菜单和桌面快捷方式 |
+| [Portable 免安装版](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-win-x64-Portable.exe) | 直接运行；设置和会话仍保存在用户应用数据目录 |
+| [SHA256SUMS-windows.txt](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/SHA256SUMS-windows.txt) | Windows EXE 的 SHA-256 校验值 |
+
+Windows 包包含 Electron 运行时；项目文件工具与外部 ACP Agent 的依赖要求同上。当前未配置 Windows 代码签名证书。构建提交号见 Release 附件 `BUILD-COMMIT-windows.txt`。
+
+### 首次使用
 
 首次启动后：
 
@@ -276,7 +290,7 @@ pnpm build:electron
 | 命令 | 配置的产物格式 |
 | --- | --- |
 | `pnpm package:mac` | DMG、ZIP |
-| `pnpm package:win` | NSIS 安装包、Portable |
+| `pnpm package:win` | Windows x64 NSIS 安装包、Portable 免安装版（新应用图标） |
 | `pnpm package:linux` | AppImage |
 
 产物输出至 `dist-electron/`。构建配置位于 [`electron.vite.config.ts`](electron.vite.config.ts)，打包配置位于 [`electron-builder.cjs`](electron-builder.cjs)。
@@ -291,12 +305,31 @@ pnpm exec electron-builder --mac --arm64 --publish never
 
 当前 macOS 配置使用 ad-hoc 签名；正式 Developer ID 分发需要自行配置证书与公证。内置 MCP 服务、依赖和技能文件均随应用打包，项目文件服务仍依赖外部 `npx`。
 
+Windows（64 位 Windows 10/11）打包：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm package:win
+```
+
+输出 `Smallest-Agent-0.1.0-win-x64-Setup.exe` 和 `Smallest-Agent-0.1.0-win-x64-Portable.exe`（文件名随版本号变化）。安装版支持选择安装目录，并创建开始菜单和桌面快捷方式；免安装版可直接运行，设置和会话仍保存在用户应用数据目录。当前未配置 Windows 代码签名证书。
+
+[`Windows package`](.github/workflows/windows.yml) 在 Windows runner 上构建 x64 产物，验证打包依赖、实际安装到含空格与中文的路径，并检查应用能进入可输入状态。推送到 `main`、创建版本标签和 Pull Request 会触发，也可在 GitHub Actions 中手动运行。成功后从该次运行的 `Smallest-Agent-windows-x64` artifact 下载两个 EXE、SHA-256 校验文件和构建提交号。手动运行时填写 `release_tag`（例如 `v0.1.0`），验证通过后会上传 Windows 附件到对应的已有 Release；不填写则仅构建，不发布。
+
+macOS 上也可执行 `pnpm package:win` 交叉打包。pnpm 会额外安装 Windows 原生可选依赖，打包时只保留目标平台和架构；交叉打包不能代替 Windows 上的安装与运行验证。
+
 打包体积控制：纯 JavaScript 依赖放在 `devDependencies`，由 Vite 编译、tree-shake 和压缩进主进程或前端，避免再复制完整依赖目录。`dependencies` 仅保留需要原生库的 Transformers；它固定为 4.2.0，Node 入口使用本地 CPU 推理，所以排除独立的 `onnxruntime-web` 浏览器/WASM 发行文件。升级 Transformers 后必须重新检查入口依赖并验证本地推理。ONNX 原生库按**目标平台与架构**保留；模型缓存、源码映射和开发文件不进包，Electron 仅保留英文、简体中文和繁体中文资源。DMG 使用 UDBZ 压缩，换取更小的下载体积。
 
-修改依赖分类后先运行 `pnpm install --frozen-lockfile`，同步 pnpm 的已安装依赖信息，再打包。可用以下命令验证本机架构的 macOS 产物：
+修改依赖分类后先运行 `pnpm install --frozen-lockfile`，同步 pnpm 的已安装依赖信息，再打包。可用以下命令验证本机平台和架构的产物：
 
 ```bash
 pnpm check:package "dist-electron/mac-arm64/Smallest Agent.app"
+
+# 在 Windows 上验证原生依赖和内置 MCP
+pnpm check:package dist-electron/win-unpacked
+
+# 在 macOS 交叉打包后，只做 Windows 归档检查（不声称已验证运行）
+pnpm check:package dist-electron/win-unpacked --archive-only --platform=win32 --arch=x64
 
 # 可选：传入已有模型目录，额外验证真实离线 embedding（不下载模型）
 pnpm check:package "dist-electron/mac-arm64/Smallest Agent.app" \

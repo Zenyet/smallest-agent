@@ -5,6 +5,10 @@
   "type": "module",
   "main": "out/main/index.js",
   "pnpm": {
+    "supportedArchitectures": {
+      "os": ["current", "win32"],
+      "cpu": ["current", "x64"]
+    },
     "onlyBuiltDependencies": [
       "electron",
       "esbuild",
@@ -21,7 +25,7 @@
     "build:electron": "electron-vite build",
     "preview:electron": "electron-vite preview",
     "package:mac": "electron-vite build && electron-builder --mac",
-    "package:win": "electron-vite build && electron-builder --win",
+    "package:win": "electron-vite build && electron-builder --win --x64 --publish never",
     "package:linux": "electron-vite build && electron-builder --linux",
     "build:icons": "node scripts/build-icons.mjs",
     "measure:startup": "node scripts/measure-startup.mjs",

@@ -24,6 +24,7 @@ const isDev = !app.isPackaged
 
 traceStartup('main-entry')
 Menu.setApplicationMenu(null)
+if (process.platform === 'win32') app.setAppUserModelId('com.smallest-agent.app')
 
 // 首次导航等待的上限：正常情况下（dev server / 本地文件）远用不到这么久，
 // 这只是防止"从未 finish 也从未 fail"的极端情况把启动挂死。
@@ -112,7 +113,7 @@ function createWindow(): BrowserWindow {
     // 代价二：backgroundColor 失效（窗口底由网页自己画），所以下面改成
     // ready-to-show 之后再显示，见那里。
     frame: false,
-    transparent: true,
+    transparent: process.platform === 'darwin',
     // 透明窗口在 renderer 画出第一帧之前是**真的透明**（backgroundColor 不再兜底），
     // 直接显示会看到一个能透视桌面的窗口闪一下。等首帧准备好再显示。
     show: false,
@@ -121,6 +122,7 @@ function createWindow(): BrowserWindow {
     // Windows/Linux 没有红绿灯，frame:false 之后系统按钮要靠 overlay 画回来
     // （这也是 Windows 自定义标题栏的标准做法）。macOS 不需要。
     ...(process.platform !== 'darwin' ? {
+      titleBarStyle: 'hidden',
       titleBarOverlay: { color: '#17181a', symbolColor: '#a5a8ad', height: 36 },
     } : {}),
     webPreferences: {
