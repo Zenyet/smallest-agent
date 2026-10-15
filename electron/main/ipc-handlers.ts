@@ -115,7 +115,8 @@ export function setupIpcHandlers(
     },
   }
 
-  const readConfig = () => loadConfig(buildEnv(process.env, getSettings(), paths))
+  const readConfig = (options?: { allowMissingApiKey?: boolean }) =>
+    loadConfig(buildEnv(process.env, getSettings(), paths), options)
 
   // 外部 CLI（ACP）的实例缓存。审批复用现有的闸口 —— ACP 的权限请求和内置
   // agent 的写工具审批是同一件事「有后果的动作执行前必须显式确认」，
@@ -220,7 +221,7 @@ export function setupIpcHandlers(
     const project = getProjectsState().projects.find((p) => p.id === projectId)
     if (!project) throw new Error('请先选择一个本地项目')
     const config = loadConfig(buildEnv(process.env, getSettings(), paths), { allowMissingApiKey: true })
-    if (!config.apiKey) throw new Error('请先在凭据设置中配置当前模型的 API Key')
+    if (!config.apiKey) throw new Error('“理解项目”目前使用内置 Agent，请先在「模型连接」中配置 API Key。Codex / Claude Code 订阅可用于普通聊天。')
     const id = newSessionId(Date.now())
     const task = tasks.create(id, project)
     try {

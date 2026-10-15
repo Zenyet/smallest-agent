@@ -82,7 +82,7 @@ export function ConnectionSettings({ form, status, available = true }: { form: S
         </div>}
       </section>
     })}</div>
-    <SettingsDisclosure className="st-details" title="从本机 CLI 导入已有凭据"><p>导入只更新目标服务的凭据，保留当前对话的模型选择。</p>
+    <SettingsDisclosure className="st-details" title="从本机 CLI 导入已有凭据"><p>此处仅为内置 Agent 导入 API Key。使用 Codex / Claude Code 的订阅登录，请在对话中选择对应引擎，无需导入凭据。</p><p>导入只更新目标服务的凭据，保留当前对话的模型选择。</p>
       <SettingsButton type="button" className="st-button" disabled={detecting} onClick={() => void detect()}>{detecting ? '正在检测…' : '检测已有配置'}</SettingsButton>
       {detections?.map(d => <div className="st-row" key={d.provider}><div className="st-grow"><strong>{d.provider === 'claude' ? 'Claude Code' : d.provider === 'codex' ? 'Codex' : 'Gemini CLI'}</strong><p className="st-hint">{d.available ? '检测到配置，可预览导入' : d.reason ?? '未找到可导入的配置'}</p></div>
         {d.available && (d.provider === 'claude' || d.provider === 'codex') && <SettingsButton type="button" className="st-button" onClick={() => setPreview(d.provider as 'claude' | 'codex')}>预览导入</SettingsButton>}</div>)}

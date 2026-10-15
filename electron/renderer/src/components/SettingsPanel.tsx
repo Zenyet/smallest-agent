@@ -62,7 +62,7 @@ export function SettingsPanel({ settings, activeSection, providers, onToggleProv
             setProviderBusy(p.id)
             void runAction(async () => { await onToggleProvider(p.id, enabled) }).finally(() => setProviderBusy(null))
           }} />}</div>)}
-        <SettingsDisclosure className="st-details" title="添加引擎与权限说明"><p>外部 CLI 使用各自的登录、工具和权限设置。首次使用可能需要准备适配器；启用不代表已经安装或登录。</p><p>新增引擎可编辑配置文件，重启应用后生效。</p><p className="st-code">{providers?.configPath ?? '配置路径暂不可用'}</p></SettingsDisclosure>
+        <SettingsDisclosure className="st-details" title="添加引擎与权限说明"><p>外部 CLI 使用各自的登录、工具和权限设置。Codex / Claude Code 已通过订阅登录时，无需在「模型连接」中填写 API Key。首次使用可能需要准备适配器；启用不代表已经安装或登录。</p><p>新增引擎可编辑配置文件，重启应用后生效。</p><p className="st-code">{providers?.configPath ?? '配置路径暂不可用'}</p></SettingsDisclosure>
         <div className="st-section-head"><h3>内置 Agent 能力</h3></div>{field('SUBAGENT')}
         <div className="st-section-head"><h3>网络搜索</h3></div><p className="st-hint">选择一家配置即可；未配置时使用基础搜索。若两家都有凭据，按现有搜索策略选择。</p>
         <div className="st-field st-spaced"><span>搜索服务</span><SettingsSelect aria-label="搜索服务" value={searchService} onValueChange={setSearchService} options={[{ value: "BRAVE_API_KEY", label: "Brave Search" }, { value: "TAVILY_API_KEY", label: "Tavily" }]} /></div>

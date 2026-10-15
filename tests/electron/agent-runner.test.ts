@@ -5,6 +5,8 @@ import { loadConfig } from '../../src/config'
 import type { Config } from '../../src/types'
 import type { AgentDef } from '../../electron/main/agents'
 import type { Message } from '../../src/types'
+import type { TurnRequest } from '../../electron/main/provider/types'
+import { buildEnv } from '../../electron/main/config-env'
 
 const config = loadConfig({ DEEPSEEK_API_KEY: 'k' })
 
@@ -60,6 +62,73 @@ function makeDeps(overrides: Partial<RunnerDeps> = {}): RunnerDeps {
     ...overrides,
   }
 }
+
+describe('外部 CLI 认证隔离', () => {
+  const withoutKey: RunnerDeps['loadConfig'] = (options) => loadConfig(
+    buildEnv({}, {}, { sessionsDir: '/tmp/cli-sessions', cacheDir: '/tmp/cli-cache' }), options,
+  )
+
+  it.each(['codex', 'claude-code'])('%s 无内置 API Key 也能完成对话和存盘，不调用内置模型', async (id) => {
+    const { events, emit } = makeEmitter()
+    const save = vi.fn(async () => {})
+    const forDir = vi.fn(async () => { throw new Error('不应启动内置文件工具') })
+    const buildCallModel = vi.fn(), makeSummarize = vi.fn(), verify = vi.fn(), makeExtract = vi.fn()
+    const runTurn = vi.fn(async (request: TurnRequest) => {
+      expect(request.config.apiKey).toBe('')
+      expect(request.cwd).toBe('/tmp/project')
+      request.emit({ kind: 'delta', text: 'CLI 回答' })
+      await request.onComplete([
+        ...request.history,
+        { role: 'user', content: request.question },
+        { role: 'assistant', content: 'CLI 回答' },
+      ])
+      return { answer: 'CLI 回答', evidence: ['CLI 管理的工具结果'] }
+    })
+    const runner = createAgentRunner(makeDeps({
+      loadConfig: withoutKey, emit, buildCallModel, makeSummarize, verify, makeExtract,
+      makeSessionStore: () => ({ load: async () => [], save }),
+      resolveProvider: () => ({ id, runTurn }),
+      resolveCwd: () => '/tmp/project',
+      fsPool: { forDir, disposeAll: async () => {} },
+      facts: { getAll: () => [], remember: vi.fn(), forget: vi.fn() },
+    }))
+    await runner.run('s1', '我一直使用本机订阅登录，希望记住这个偏好')
+    expect(runTurn).toHaveBeenCalledTimes(1)
+    expect(save).toHaveBeenCalledWith('s1', expect.arrayContaining([
+      { role: 'assistant', content: 'CLI 回答' },
+    ]))
+    expect(events.map(e => e.type)).toEqual(['chunk', 'complete'])
+    for (const call of [buildCallModel, makeSummarize, verify, makeExtract, forDir]) {
+      expect(call).not.toHaveBeenCalled()
+    }
+  })
+
+  it('切回内置引擎后仍校验 API Key', async () => {
+    const { events, emit } = makeEmitter()
+    const runTurn = vi.fn(async () => ({ answer: 'ok', evidence: [] }))
+    const resolveProvider = vi.fn<NonNullable<RunnerDeps['resolveProvider']>>()
+      .mockReturnValueOnce({ id: 'codex', runTurn }).mockReturnValueOnce(null)
+    const runner = createAgentRunner(makeDeps({ loadConfig: withoutKey, emit, resolveProvider }))
+    await runner.run('s1', 'hello')
+    await runner.run('s1', 'hello again')
+    expect(runTurn).toHaveBeenCalledTimes(1)
+    expect(events.filter(e => e.type === 'error')).toEqual([
+      { type: 'error', payload: expect.objectContaining({ code: 'API_KEY_MISSING' }) },
+    ])
+  })
+
+  it('CLI 登录失败时显示其错误，不回落到内置模型', async () => {
+    const { events, emit } = makeEmitter()
+    const buildCallModel = vi.fn()
+    const runner = createAgentRunner(makeDeps({
+      loadConfig: withoutKey, emit, buildCallModel,
+      resolveProvider: () => ({ id: 'codex', runTurn: async () => { throw new Error('请运行 codex login') } }),
+    }))
+    await runner.run('s1', 'hello')
+    expect(events).toEqual([{ type: 'error', payload: expect.objectContaining({ message: '请运行 codex login' }) }])
+    expect(buildCallModel).not.toHaveBeenCalled()
+  })
+})
 
 describe('自定义 agent 预设', () => {
   const tools = (): Record<string, { name: string; description: string; parameters: unknown; run: () => Promise<string> }> => ({

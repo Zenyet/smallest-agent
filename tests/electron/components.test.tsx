@@ -495,7 +495,7 @@ describe('ChatWindow', () => {
         onDecide={() => {}}
       />,
     )
-    expect(screen.getByText(/请在凭据设置中配置当前模型的 API Key/)).toBeTruthy()
+    expect(screen.getByText(/内置 Agent 需要在「模型连接」中配置 API Key/)).toBeTruthy()
   })
 
   it('有 pendingApproval 时渲染 ApprovalCard，点允许触发 onDecide("allow")', () => {

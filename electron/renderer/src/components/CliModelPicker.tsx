@@ -9,14 +9,14 @@
 //   • 外部 CLI：那个 CLI 自己声明的模型 id（通过 env / args 传给子进程），
 //     一家就是一个清单、通常三五项
 //
-// 所以这边**不分组**：一家 CLI 的模型列表没有第二层，加个分组头只是噪音。
+// 一家 CLI 平铺模型；Codex 在默认项之后标出推荐模型集。
 // 浮层规格仍然是同一套（overlay 底 + line_strong 边 + card 圆角）。
 //
 // 模型清单为什么要用户在 providers.json 里配（而不是问 CLI）：
 // ACP 协议里没有模型选择，见 main/providers.ts 里 CliModel 的注释。
 // ============================================================================
 
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
+import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { Icon } from './Icon'
 import type { ProvidersView } from '../../../shared/channels'
 
@@ -92,29 +92,34 @@ export function CliModelPicker({
         // 再加一条 border 就是双层描边。四个选择器 + 右键菜单共用这一套外观。
         className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
       >
-        {view.models.map((m) => {
+        {view.current === 'codex' && <div className="px-2 py-1 text-ink-3">选择模型</div>}
+        {view.models.map((m, index) => {
           const isCurrent = m.id === view.currentModel
           return (
-            <button
-              key={m.id}
-              type="button"
-              role="option"
-              aria-selected={isCurrent}
-              onClick={() => {
-                setOpen(false)
-                onPick(m.id)
-              }}
-              className={`flex h-[26px] flex-none cursor-pointer items-center justify-between gap-2 rounded-chip border-none px-2 text-left text-[12px] transition-colors duration-100 ${
-                isCurrent
-                  ? 'bg-accent-tint text-ink'
-                  : 'bg-transparent text-ink-2 hover:bg-overlay-hover hover:text-ink'
-              }`}
-            >
-              <span className="truncate">{m.name}</span>
-              {isCurrent && (
-                <Icon name="check" size={11} strokeWidth={2.2} className="flex-none text-accent-ink" />
+            <Fragment key={m.id}>
+              {view.current === 'codex' && index === 1 && view.models[0]?.id === 'default' && (
+                <div className="px-2 py-1 text-ink-3">推荐模型集</div>
               )}
-            </button>
+              <button
+                type="button"
+                role="option"
+                aria-selected={isCurrent}
+                onClick={() => {
+                  setOpen(false)
+                  onPick(m.id)
+                }}
+                className={`flex h-[26px] flex-none cursor-pointer items-center justify-between gap-2 rounded-chip border-none px-2 text-left text-[12px] transition-colors duration-100 ${
+                  isCurrent
+                    ? 'bg-accent-tint text-ink'
+                    : 'bg-transparent text-ink-2 hover:bg-overlay-hover hover:text-ink'
+                }`}
+              >
+                <span className="truncate">{m.name}</span>
+                {isCurrent && (
+                  <Icon name="check" size={11} strokeWidth={2.2} className="flex-none text-accent-ink" />
+                )}
+              </button>
+            </Fragment>
           )
         })}
       </div>

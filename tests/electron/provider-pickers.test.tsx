@@ -5,6 +5,7 @@ import { ProviderPicker } from '../../electron/renderer/src/components/ProviderP
 import { PermissionPicker } from '../../electron/renderer/src/components/PermissionPicker'
 import { CliModelPicker } from '../../electron/renderer/src/components/CliModelPicker'
 import type { ProvidersView } from '../../electron/shared/channels'
+import { exampleProvidersState, modelsFor } from '../../electron/main/providers'
 
 // jsdom 没实现 popover。补一个最小桩只维持开关状态 —— 真正的 light dismiss
 // 是平台行为，这里验不了（和 model-picker.test.tsx 同一条）。
@@ -136,6 +137,18 @@ describe('PermissionPicker', () => {
 })
 
 describe('CliModelPicker', () => {
+  it('Codex 显示推荐模型，选中 Astra 后可切回默认', () => {
+    const picked: string[] = []
+    render(<CliModelPicker view={view({
+      current: 'codex', currentModel: 'gpt-6-astra', models: modelsFor(exampleProvidersState(), 'codex'),
+    })} onPick={id => picked.push(id)} />)
+    expect(screen.getByText('推荐模型集')).toBeTruthy()
+    const selected = screen.getAllByRole('option', { hidden: true }).filter(o => o.getAttribute('aria-selected') === 'true')
+    expect(selected.map(o => o.textContent)).toEqual(['GPT-6 Astra'])
+    fireEvent.click(screen.getByRole('option', { name: '默认', hidden: true }))
+    expect(picked).toEqual(['default'])
+  })
+
   const withModels = view({
     current: 'claude-code',
     models: [

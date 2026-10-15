@@ -253,9 +253,21 @@ function normalizeExternal(raw: unknown): ExternalProvider | null {
   // 不能占用内置那个 id，否则选择器里两项同 id，选中判断会指向错的那个
   if (p.id === BUILTIN_ID) return null
   const args = Array.isArray(p.args) ? p.args.filter((a): a is string => typeof a === 'string') : []
-  const models = Array.isArray(p.models)
+  let models = Array.isArray(p.models)
     ? p.models.map(normalizeCliModel).filter((m): m is CliModel => m !== null)
     : []
+  // 只升级旧版本原样写入的 Codex 模板；手工配置的命令、模型和参数保持原样。
+  const legacyIds = ['gpt-5.2', 'gpt-5.1', 'gpt-5']
+  if (
+    p.id === 'codex' && p.command === 'npx' &&
+    args.length === 2 && args[0] === '-y' && args[1] === '@agentclientprotocol/codex-acp@latest' &&
+    models.length === legacyIds.length &&
+    models.every((m, i) => m.id === legacyIds[i] && m.name === legacyIds[i].toUpperCase() &&
+      m.args?.length === 2 && m.args[0] === '--model' && m.args[1] === m.id &&
+      !m.env && !m.contextWindow)
+  ) {
+    models = codexModels()
+  }
   return {
     id: p.id,
     name: typeof p.name === 'string' && p.name !== '' ? p.name : p.id,
@@ -589,12 +601,26 @@ export function forgetSession(state: ProvidersState, sessionId: string): Provide
 // 模板
 // ============================================================================
 
+/** Codex 推荐模型；默认项不传 --model，沿用本机 Codex 的配置。 */
+function codexModels(): CliModel[] {
+  return [
+    { id: 'default', name: '默认' },
+    ...[
+      ['gpt-6.1-sol', 'GPT-6.1 Sol'],
+      ['gpt-6-astra', 'GPT-6 Astra'],
+      ['gpt-6-sol', 'GPT-6 Sol'],
+      ['gpt-6-luna', 'GPT-6 Luna'],
+      ['gpt-5.6-sol', 'GPT-5.6 Sol'],
+      ['gpt-5.6-terra', 'GPT-5.6 Terra'],
+      ['gpt-5.6-luna', 'GPT-5.6 Luna'],
+    ].map(([id, name]) => ({ id, name, args: ['--model', id] })),
+  ]
+}
+
 /**
  * 示例配置，第一次打开设置页时写一份进去。
  *
- * **五家都默认 disabled** —— 它们要 npx 拉包（首次几十秒）且要各自的认证，
- * 不该在用户没看过配置的情况下就出现在选择器里。用户想用哪家，把那家的
- * disabled 去掉。
+ * 五家默认启用，用户可在设置里停用；首次使用要准备适配器和各自的登录。
  *
  * ## 这几个包名都核对过 npm
  *
@@ -654,11 +680,7 @@ export function exampleProvidersState(): ProvidersState {
         name: 'Codex',
         command: 'npx',
         args: ['-y', '@agentclientprotocol/codex-acp@latest'],
-        models: [
-          argModel('gpt-5.2', 'GPT-5.2'),
-          argModel('gpt-5.1', 'GPT-5.1'),
-          argModel('gpt-5', 'GPT-5'),
-        ],
+        models: codexModels(),
       },
       {
         id: 'gemini',

@@ -616,9 +616,22 @@ describe('exampleProvidersState（模板）', () => {
     expect(launch?.env.ANTHROPIC_MODEL).toBe('claude-sonnet-5')
   })
 
-  it('Codex 走 --model 命令行参数', () => {
-    const launch = resolveLaunch(exampleProvidersState(), 'codex', 'gpt-5.2')
-    expect(launch?.args.slice(-2)).toEqual(['--model', 'gpt-5.2'])
+  it('Codex 提供默认项和截图中的七个模型，模型参数对应实际 ID', () => {
+    const s = exampleProvidersState()
+    expect(modelsFor(s, 'codex').map(m => m.name)).toEqual([
+      '默认', 'GPT-6.1 Sol', 'GPT-6 Astra', 'GPT-6 Sol', 'GPT-6 Luna',
+      'GPT-5.6 Sol', 'GPT-5.6 Terra', 'GPT-5.6 Luna',
+    ])
+    for (const model of modelsFor(s, 'codex').slice(1)) {
+      expect(resolveLaunch(s, 'codex', model.id)?.args.slice(-2)).toEqual(['--model', model.id])
+    }
+    const bound = assignProvider(s, 's1', 'codex')
+    expect(modelFor(bound, 's1')).toBe('default')
+    expect(resolveLaunch(bound, 'codex', modelFor(bound, 's1'))?.args).toEqual([
+      '-y', '@agentclientprotocol/codex-acp@latest',
+    ])
+    expect(modelFor(assignModel(bound, 's1', 'gpt-6-astra'), 's1')).toBe('gpt-6-astra')
+    expect(modelFor(assignModel(bound, 's1', 'default'), 's1')).toBe('default')
   })
 
   // Gemini CLI 原生支持 ACP，不需要第三方适配器
@@ -633,5 +646,45 @@ describe('exampleProvidersState（模板）', () => {
     const s = exampleProvidersState()
     expect(modelsFor(s, 'pi')).toEqual([])
     expect(modelsFor(s, 'deepseek-harness')).toEqual([])
+  })
+})
+
+describe('Codex 旧模板模型升级', () => {
+  const legacy = () => {
+    const s = assignModel(assignProvider(exampleProvidersState(), 's1', 'codex'), 's1', 'gpt-5.2')
+    s.external.find(p => p.id === 'codex')!.models = ['gpt-5.2', 'gpt-5.1', 'gpt-5'].map(id => ({
+      id, name: id.toUpperCase(), args: ['--model', id],
+    }))
+    return s
+  }
+
+  it('已有用户也获得新模型列表，失效选择回到本机默认，重复读取保持稳定', () => {
+    const s = legacy()
+    s.external.find(p => p.id === 'codex')!.cwd = '/tmp/project'
+    s.disabledProviders = ['pi']
+    const updated = normalizeProvidersState(s)
+    expect(modelsFor(updated, 'codex')).toEqual(modelsFor(exampleProvidersState(), 'codex'))
+    expect(modelFor(updated, 's1')).toBe('default')
+    expect(providerFor(updated, 's1')).toBe('codex')
+    expect(updated.disabledProviders).toEqual(['pi'])
+    expect(resolveLaunch(updated, 'codex')?.cwd).toBe('/tmp/project')
+    expect(normalizeProvidersState(updated)).toEqual(updated)
+  })
+
+  it.each(['models', 'command', 'args', 'context'] as const)('保留用户自定义的 %s', (field) => {
+    const s = legacy(), provider = s.external.find(p => p.id === 'codex')!
+    if (field === 'models') provider.models!.push({ id: 'custom', name: 'My model', args: ['--model', 'custom'] })
+    if (field === 'command') provider.command = '/usr/local/bin/codex-acp'
+    if (field === 'args') provider.models![0].args = ['--model', 'private-alias']
+    if (field === 'context') provider.models![0].contextWindow = 100_000
+    const updated = normalizeProvidersState(s)
+    expect(modelsFor(updated, 'codex')).toEqual(provider.models)
+    expect(modelFor(updated, 's1')).toBe('gpt-5.2')
+  })
+
+  it('用户清空列表后不自动补回模板', () => {
+    const s = legacy()
+    s.external.find(p => p.id === 'codex')!.models = []
+    expect(modelsFor(normalizeProvidersState(s), 'codex')).toEqual([])
   })
 })

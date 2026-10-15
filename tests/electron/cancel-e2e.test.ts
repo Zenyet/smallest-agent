@@ -63,7 +63,7 @@ function collector() {
 function makeDeps(over: Partial<RunnerDeps> = {}): RunnerDeps {
   const { emit } = collector()
   return {
-    loadConfig: fakeConfig,
+    loadConfig: () => fakeConfig(),
     makeSessionStore: () => ({ load: async () => [] as Message[], save: async () => {} }),
     buildCallModel: () => async () => ({ text: 'ok', toolCalls: [] }),
     makeSummarize: () => async () => 'summary',

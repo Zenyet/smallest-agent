@@ -30,7 +30,7 @@ import type { ApprovalDecision, ErrorCode } from '../../../shared/channels'
 import type { ContentPart } from '../../../../src/types'
 
 const ERROR_TEXT: Record<ErrorCode, string> = {
-  API_KEY_MISSING: '请在凭据设置中配置当前模型的 API Key',
+  API_KEY_MISSING: '内置 Agent 需要在「模型连接」中配置 API Key；使用本机订阅请切换到 Codex 或 Claude Code 引擎',
   MODEL_ERROR: '模型调用失败，请检查网络或 API 配额',
   MAX_TURNS: 'Agent 反复调用工具未能收敛，已停止（可在设置中调大 MAX_TURNS）',
   BUSY: '上一个问题还在处理中，请稍候',

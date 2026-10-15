@@ -50,7 +50,7 @@ export interface AgentEmitter {
 }
 
 export interface RunnerDeps {
-  loadConfig: () => Config
+  loadConfig: (options?: { allowMissingApiKey?: boolean }) => Config
   makeSessionStore: (dir: string) => SessionStore
   buildCallModel: (
     config: Config,
@@ -167,7 +167,7 @@ export interface AgentRunner {
 export function makeDefaultRunnerDeps(
   registry: ToolRegistry,
   emit: AgentEmitter,
-  loadConfig: () => Config = realLoadConfig,
+  loadConfig: RunnerDeps['loadConfig'] = (options) => realLoadConfig(undefined, options),
   gate: ApprovalGate = createApprovalGate(),
 ): RunnerDeps {
   return {
@@ -291,7 +291,9 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
      */
     let pendingExtract: { config: Config; answer: string } | null = null
     try {
-        const baseConfig = deps.loadConfig()
+        // 外部 CLI 自己管理登录和模型调用，不能先用内置模型的 Key 校验拦截。
+        const externalProvider = options.projectOverview ? null : deps.resolveProvider?.(sessionId)
+        const baseConfig = deps.loadConfig({ allowMissingApiKey: Boolean(externalProvider) })
         const config = options.projectOverview
           ? { ...baseConfig, systemPrompt: PROJECT_OVERVIEW_PROMPT, nativeSearch: undefined, autoExtractFacts: false }
           : baseConfig
@@ -314,13 +316,13 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
         // 见 provider/registry.ts。
         // 文件工具按这个会话的工作目录取。没有工作目录（未分组会话）返回空注册表。
         const cwd = deps.resolveCwd?.(sessionId)
-        const fsTools = (await deps.fsPool?.forDir(cwd)) ?? {}
+        const fsTools = externalProvider ? {} : (await deps.fsPool?.forDir(cwd)) ?? {}
 
         // 记忆工具按轮建，理由和 fsTools 一样：它们要知道「这一轮属于哪个
         // 会话、哪个项目」。在 createRuntime 里建一次的话 sessionId 和
         // projectScope 会被启动那一刻的值定死 —— 那时候连会话都还没选。
         const projectScope = scopeFor(cwd)
-        const memoryTools: ToolRegistry = deps.facts
+        const memoryTools: ToolRegistry = deps.facts && !externalProvider
           ? (() => {
               const remember = makeRememberTool({
                 persist: (input) => deps.facts!.remember(input),
@@ -374,7 +376,7 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
         // 顺序要紧：**在**撤 web_search 之后过白名单。反过来的话，一个白名单里
         // 写了 web_search 的 agent 在智谱那种自带搜索的厂商下会把它加回来，
         // 而那个工具此刻不该存在。
-        const agent = options.projectOverview ? undefined : deps.resolveAgent?.(sessionId)
+        const agent = options.projectOverview || externalProvider ? undefined : deps.resolveAgent?.(sessionId)
         const agentConfig = agent ? applyAgent(agent, config) : config
         const turnRegistry = agent ? filterTools(agent, composedRegistry) : composedRegistry
 
@@ -392,7 +394,7 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
         // 而 compactMessages 不知道系统提示里多了东西，两边加起来超窗。
         // 取 1/8 且不超过 800 —— 记忆是配角，不该吃掉历史的位置。
         const factsBudget = Math.min(800, Math.floor(agentConfig.maxContextTokens / 8))
-        const memoryBlock = deps.facts && !options.projectOverview
+        const memoryBlock = deps.facts && !options.projectOverview && !externalProvider
           ? renderFacts(factsFor(deps.facts.getAll(), projectScope), factsBudget)
           : ''
         const turnConfig = memoryBlock
@@ -408,7 +410,7 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
           : agentConfig
 
         const provider =
-          (options.projectOverview ? null : deps.resolveProvider?.(sessionId)) ??
+          externalProvider ??
           createBuiltinProvider({
             buildCallModel: deps.buildCallModel,
             makeSummarize: deps.makeSummarize,
@@ -543,7 +545,7 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
         //
         // 存盘已经在 provider.runTurn 的 onComplete 里落完了，这一轮对状态的
         // 影响到此为止；核查只是给答案贴个质量标注，没有理由占着串行锁。
-        if (evidence.length > 0) {
+        if (!externalProvider && evidence.length > 0) {
           pendingVerify = { config, input: { question: input, answer, evidence } }
         }
 
@@ -560,6 +562,7 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
         //      （「好的」「继续」「谢谢」「跑一下测试」），而这类短消息在
         //      真实对话里占很大比例
         if (
+          !externalProvider &&
           deps.facts &&
           deps.makeExtract &&
           turnConfig.autoExtractFacts !== false &&
