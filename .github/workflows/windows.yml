@@ -10,7 +10,8 @@ on:
         default: ''
   push:
     branches: [main]
-    tags: ['v*']
+    # 注意：tag（v*）的打包已由 release.yml 负责，这里不再监听 tags，
+    # 否则 push tag 会同时触发两个 workflow、重复打包 Windows。
     paths-ignore: ['**/*.md', 'rs/**', 'beautiful-ui/**', '.beautiful-ui-src/**']
   pull_request:
     paths-ignore: ['**/*.md', 'rs/**', 'beautiful-ui/**', '.beautiful-ui-src/**']
