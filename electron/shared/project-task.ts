@@ -1,5 +1,18 @@
 export type ProjectTaskStatus = 'running' | 'review' | 'accepted' | 'failed' | 'stopped'
 
+export const ANALYSIS_LABELS = { architecture: '结构与核心流程', operation: '运行与验证', risks: '风险与待确认项' } as const
+export type AnalysisKind = keyof typeof ANALYSIS_LABELS
+export type WorkflowStage = 'scan' | 'analyze' | 'summarize' | 'review' | 'done'
+export interface ProjectWorkflowProgress {
+  version: 1
+  stage: WorkflowStage
+  completed: AnalysisKind[]
+  scannedAt?: number
+  fileCount?: number
+  scanNote?: string
+  reportSaved?: boolean
+}
+
 export interface ProjectTaskSource {
   path: string
   excerpt: string
@@ -21,6 +34,7 @@ export interface ProjectTask {
   sources: ProjectTaskSource[]
   answer?: string
   error?: string
+  workflow?: ProjectWorkflowProgress
 }
 
 export interface ProjectTaskChanged {

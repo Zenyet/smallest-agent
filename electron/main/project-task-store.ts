@@ -3,7 +3,7 @@ import { dirname, isAbsolute, relative, resolve } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { z } from 'zod'
 import type { ToolCallEvent } from '../shared/channels'
-import { type ProjectTask, type ProjectTaskChanged } from '../shared/project-task'
+import { type ProjectTask, type ProjectTaskChanged, type ProjectWorkflowProgress } from '../shared/project-task'
 import type { Project } from './projects'
 
 const taskSchema = z.object({
@@ -12,6 +12,12 @@ const taskSchema = z.object({
   createdAt: z.number(), updatedAt: z.number(), revision: z.number(), toolCount: z.number(),
   sources: z.array(z.object({ path: z.string(), excerpt: z.string(), truncated: z.boolean() })),
   answer: z.string().optional(), error: z.string().optional(),
+  workflow: z.object({
+    version: z.literal(1), stage: z.enum(['scan', 'analyze', 'summarize', 'review', 'done']),
+    completed: z.array(z.enum(['architecture', 'operation', 'risks'])),
+    scannedAt: z.number().optional(), fileCount: z.number().optional(), scanNote: z.string().optional(),
+    reportSaved: z.boolean().optional(),
+  }).optional(),
 })
 
 function readSource(task: ProjectTask, event: ToolCallEvent): ProjectTask['sources'][number] | null {
@@ -41,7 +47,7 @@ export function createProjectTaskStore(file: string, changed: (event: ProjectTas
     for (const task of Object.values(records)) {
       if (task.status === 'running') {
         task.status = 'stopped'
-        task.error = '上次运行被中断，已保留读取记录。可以重新开始。'
+        task.error = task.workflow ? '上次运行被中断，已保存进度。点击继续分析，复用已完成的步骤。' : '上次运行被中断，已保留读取记录。可以重新开始。'
         task.updatedAt = Date.now()
         task.revision += 1
         interrupted = true
@@ -67,12 +73,23 @@ export function createProjectTaskStore(file: string, changed: (event: ProjectTas
   }
   return {
     get,
-    create(sessionId: string, project: Project): ProjectTask {
+    create(sessionId: string, project: Project, workflow = false): ProjectTask {
       check()
       if (records[sessionId]) throw new Error('这个会话已经有项目任务')
       return put({ id: randomUUID(), sessionId, projectId: project.id, projectPath: project.dir,
         projectName: project.name, prompt: `理解项目「${project.name}」，生成有文件依据的项目说明。`, status: 'running',
-        createdAt: Date.now(), updatedAt: Date.now(), revision: 0, toolCount: 0, sources: [] })
+        createdAt: Date.now(), updatedAt: Date.now(), revision: 0, toolCount: 0, sources: [],
+        ...(workflow ? { workflow: { version: 1, stage: 'scan', completed: [] } as ProjectWorkflowProgress } : {}) })
+    },
+    resume(sessionId: string) {
+      const task = get(sessionId)
+      if (!task?.workflow || task.status === 'accepted') throw new Error('这个任务不支持恢复')
+      return put({ ...task, status: 'running', error: undefined })
+    },
+    progress(sessionId: string, workflow: ProjectWorkflowProgress, sources?: ProjectTask['sources']) {
+      const task = get(sessionId)
+      if (!task || task.status !== 'running') return
+      return put({ ...task, workflow, ...(sources ? { sources, toolCount: sources.length } : {}) })
     },
     tool(event: ToolCallEvent) {
       const task = get(event.sessionId)
@@ -97,7 +114,8 @@ export function createProjectTaskStore(file: string, changed: (event: ProjectTas
     accept(sessionId: string) {
       const task = get(sessionId)
       if (!task || !['review', 'accepted'].includes(task.status)) throw new Error('任务尚未生成可采用的成果')
-      return task.status === 'accepted' ? task : put({ ...task, status: 'accepted' })
+      return task.status === 'accepted' ? task : put({ ...task, status: 'accepted',
+        ...(task.workflow ? { workflow: { ...task.workflow, stage: 'done' } } : {}) })
     },
     remove(sessionId: string) {
       check()

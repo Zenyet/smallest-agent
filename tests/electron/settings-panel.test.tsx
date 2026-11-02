@@ -138,7 +138,7 @@ describe('设置改版', () => {
   })
   it('停用的引擎仍可重新启用，状态不冒充可连接', () => {
     const toggle = vi.fn()
-    render(<SettingsPanel {...defaults} activeSection="agents" providers={{ options: [], current: 'builtin', models: [], permission: 'ask', configPath: '/tmp/providers.json', allProviders: [{ id: 'codex', name: 'Codex', enabled: false }] }} onToggleProvider={toggle} />)
+    render(<SettingsPanel {...defaults} activeSection="agents" providers={{ options: [], current: 'builtin', models: [], configOptions: [], permission: 'ask', configPath: '/tmp/providers.json', allProviders: [{ id: 'codex', name: 'Codex', enabled: false }] }} onToggleProvider={toggle} />)
     fireEvent.click(screen.getByRole('switch', { name: '启用 Codex' }))
     expect(toggle).toHaveBeenCalledWith('codex', true)
     expect(screen.getByText('未启用')).toBeTruthy()

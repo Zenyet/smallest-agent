@@ -12,8 +12,8 @@
 // 一家 CLI 平铺模型；Codex 在默认项之后标出推荐模型集。
 // 浮层规格仍然是同一套（overlay 底 + line_strong 边 + card 圆角）。
 //
-// 模型清单为什么要用户在 providers.json 里配（而不是问 CLI）：
-// ACP 协议里没有模型选择，见 main/providers.ts 里 CliModel 的注释。
+// 打开选择器时通过 ACP 查询 CLI 当前支持的模型；providers.json 中的静态
+// 清单作为启动探测失败、或 CLI 没有公开模型选项时的兜底。
 // ============================================================================
 
 import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
@@ -23,9 +23,13 @@ import type { ProvidersView } from '../../../shared/channels'
 export function CliModelPicker({
   view,
   onPick,
+  onRefresh,
+  refreshing = false,
 }: {
   view: ProvidersView
   onPick: (modelId: string) => void
+  onRefresh?: (force: boolean) => void
+  refreshing?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -92,7 +96,23 @@ export function CliModelPicker({
         // 再加一条 border 就是双层描边。四个选择器 + 右键菜单共用这一套外观。
         className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
       >
+        <button
+          type="button"
+          aria-label="刷新模型列表"
+          title="刷新模型列表"
+          disabled={refreshing}
+          onClick={() => onRefresh?.(true)}
+          className="flex h-7 flex-none items-center gap-1 rounded-chip border-none bg-transparent px-2 text-[11px] text-ink-3 hover:bg-overlay-hover hover:text-ink disabled:cursor-wait"
+        >
+          <Icon name="refresh" size={11} className={refreshing ? 'animate-spin' : ''} />
+          <span>{refreshing ? '正在同步…' : '刷新模型列表'}</span>
+        </button>
         {view.current === 'codex' && <div className="px-2 py-1 text-ink-3">选择模型</div>}
+        {view.models.length === 0 && (
+          <div className="px-2 py-1.5 text-[11.5px] text-ink-3">
+            此 CLI 暂未提供模型选项；可以刷新目录，或继续使用它自己的默认模型。
+          </div>
+        )}
         {view.models.map((m, index) => {
           const isCurrent = m.id === view.currentModel
           return (
@@ -104,6 +124,7 @@ export function CliModelPicker({
                 type="button"
                 role="option"
                 aria-selected={isCurrent}
+                disabled={m.available === false}
                 onClick={() => {
                   setOpen(false)
                   onPick(m.id)
@@ -112,7 +133,7 @@ export function CliModelPicker({
                   isCurrent
                     ? 'bg-accent-tint text-ink'
                     : 'bg-transparent text-ink-2 hover:bg-overlay-hover hover:text-ink'
-                }`}
+                  } ${m.available === false ? 'cursor-not-allowed opacity-45 hover:bg-transparent hover:text-ink-2' : ''}`}
               >
                 <span className="truncate">{m.name}</span>
                 {isCurrent && (

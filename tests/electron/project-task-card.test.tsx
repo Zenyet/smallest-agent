@@ -44,3 +44,31 @@ it('失败或中断的任务不提供采用按钮', () => {
   expect(screen.getByText('已停止')).toBeTruthy()
   expect(screen.queryByRole('button', { name: '采用成果' })).toBeNull()
 })
+
+it('显示工作流阶段与已完成分支，中断后提供继续操作', async () => {
+  const resume = vi.fn(async () => {})
+  render(<ProjectTaskCard task={{ ...task, status: 'stopped', error: '已保存进度', workflow: {
+    version: 1, stage: 'analyze', completed: ['architecture', 'operation'], scannedAt: 1,
+  } }} onAccept={async () => {}} onExport={async () => null} onResume={resume} />)
+  expect(screen.getByLabelText('项目分析进度')).toBeTruthy()
+  expect(screen.getByText('结构与核心流程 · 已完成')).toBeTruthy()
+  expect(screen.getByText('风险与待确认项 · 待完成')).toBeTruthy()
+  expect(screen.getByText(/继续分析会沿用这份快照/)).toBeTruthy()
+  fireEvent.click(screen.getByRole('button', { name: '继续分析' }))
+  await waitFor(() => expect(resume).toHaveBeenCalledOnce())
+  expect(screen.queryByRole('button', { name: '采用成果' })).toBeNull()
+})
+
+it('运行中可停止，恢复失败会显示错误', async () => {
+  const stop = vi.fn(async () => {})
+  const workflow = { version: 1 as const, stage: 'scan' as const, completed: [] }
+  const { rerender } = render(<ProjectTaskCard task={{ ...task, status: 'running', workflow }}
+    onAccept={async () => {}} onExport={async () => null} onStop={stop} />)
+  fireEvent.click(screen.getByRole('button', { name: '停止并保存进度' }))
+  await waitFor(() => expect(stop).toHaveBeenCalledOnce())
+  rerender(<ProjectTaskCard task={{ ...task, status: 'failed', workflow }}
+    onAccept={async () => {}} onExport={async () => null} onResume={async () => { throw new Error('凭据未配置') }} />)
+  await waitFor(() => expect((screen.getByRole('button', { name: '继续分析' }) as HTMLButtonElement).disabled).toBe(false))
+  fireEvent.click(screen.getByRole('button', { name: '继续分析' }))
+  await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('凭据未配置'))
+})

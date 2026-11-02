@@ -21,6 +21,7 @@ import type {
   CancelledEvent,
   ProviderDetection,
   ProviderSecret,
+  ModelCatalogResult,
   ProvidersView,
   AgentsView,
 } from '../shared/channels'
@@ -38,6 +39,7 @@ function subscribe<T>(channel: string, cb: (data: T) => void): () => void {
 const api = {
   ping: (): Promise<'pong'> => ipcRenderer.invoke(CH.ping),
   startProjectTask: (projectId: string): Promise<ProjectTask> => ipcRenderer.invoke(CH.startProjectTask, projectId),
+  resumeProjectTask: (sessionId: string): Promise<ProjectTask> => ipcRenderer.invoke(CH.resumeProjectTask, sessionId),
   getProjectTask: (sessionId: string): Promise<ProjectTask | null> => ipcRenderer.invoke(CH.getProjectTask, sessionId),
   acceptProjectTask: (sessionId: string): Promise<ProjectTask> => ipcRenderer.invoke(CH.acceptProjectTask, sessionId),
   exportProjectTask: (sessionId: string): Promise<string | null> => ipcRenderer.invoke(CH.exportProjectTask, sessionId),
@@ -50,6 +52,8 @@ const api = {
   getSettings: (): Promise<DesktopSettings> => ipcRenderer.invoke(CH.getSettings),
   getSettingsStatus: (): Promise<SettingsStatus> => ipcRenderer.invoke(CH.getSettingsStatus),
   checkConnection: (vendorId: string): Promise<ConnectionCheck> => ipcRenderer.invoke(CH.checkConnection, vendorId),
+  refreshBuiltinModels: (force = false): Promise<ModelCatalogResult[]> =>
+    ipcRenderer.invoke(CH.refreshBuiltinModels, force),
   selectNotesDirectory: (): Promise<string | null> => ipcRenderer.invoke(CH.selectNotesDirectory),
   saveSettings: (patch: DesktopSettings, unset?: string[]): Promise<DesktopSettings> =>
     ipcRenderer.invoke(CH.saveSettings, patch, unset),
@@ -121,6 +125,10 @@ const api = {
     ipcRenderer.invoke(CH.setSessionProvider, sessionId, providerId),
   setSessionModel: (sessionId: string, modelId: string): Promise<ProvidersView> =>
     ipcRenderer.invoke(CH.setSessionModel, sessionId, modelId),
+  setSessionConfigOption: (sessionId: string, optionId: string, value: string): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.setSessionConfigOption, sessionId, optionId, value),
+  refreshCliModels: (sessionId: string, providerId: string, force = false): Promise<ProvidersView> =>
+    ipcRenderer.invoke(CH.refreshCliModels, sessionId, providerId, force),
   setSessionPermission: (sessionId: string, mode: string): Promise<ProvidersView> =>
     ipcRenderer.invoke(CH.setSessionPermission, sessionId, mode),
   /** 启用/停用一个外部 CLI（写顶层黑名单）。返回写完之后的完整视图。 */

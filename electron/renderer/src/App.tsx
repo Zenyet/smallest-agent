@@ -2,7 +2,16 @@ import type { ProjectTask } from '../../shared/project-task'
 import type { ContentPart } from '../../../src/types'
 import { lazy, Suspense, useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react'
 import { SessionList } from './components/SessionList'
-import { catalog as buildCatalog, DEFAULT_VENDOR, defaultModel } from '../../main/vendors'
+import {
+  ALL,
+  CUSTOM_API_KEY,
+  CUSTOM_BASE_URL,
+  CUSTOM_MODELS,
+  DEFAULT_VENDOR,
+  apiKeySetting,
+  catalog as buildCatalog,
+  defaultModel,
+} from '../../main/vendors'
 import { ChatWindow } from './components/ChatWindow'
 import type { SettingsPanelHandle } from './components/SettingsPanel'
 import { SettingsNav } from './components/SettingsNav'
@@ -20,6 +29,7 @@ import type {
   ProjectsState,
   RuntimeStatusEvent,
   ProvidersView,
+  ModelCatalogResult,
 } from '../../shared/channels'
 
 const SettingsPanel = lazy(() => import('./components/SettingsPanel').then((m) => ({ default: m.SettingsPanel })))
@@ -53,6 +63,8 @@ export function App() {
   const [chats, dispatch] = useReducer(chatReducer, {})
   const [sessions, setSessions] = useState<SessionMeta[]>([])
   const [currentId, setCurrentId] = useState<string | null>(null)
+  const currentIdRef = useRef<string | null>(currentId)
+  currentIdRef.current = currentId
   const [projectTasks, setProjectTasks] = useState<Record<string, ProjectTask>>({})
   const [startingTask, setStartingTask] = useState(false)
   const [taskStartError, setTaskStartError] = useState('')
@@ -140,16 +152,37 @@ export function App() {
   // 在别处改（主进程自己写、将来的第二个窗口），只认自己那次写的结果会让
   // 手里这份悄悄变成死的。
   const [settings, setSettings] = useState<DesktopSettings | null>(null)
+  const settingsRef = useRef<DesktopSettings | null>(null)
+  const modelCatalogRevisionRef = useRef(0)
+  const [dynamicModels, setDynamicModels] = useState<Record<string, { id: string; name: string }[]>>({})
+  const [refreshingBuiltinModels, setRefreshingBuiltinModels] = useState(false)
+  const [refreshingCliModels, setRefreshingCliModels] = useState(false)
+  const refreshingBuiltinModelsRef = useRef(false)
+  const refreshingCliModelsRef = useRef(false)
+
+  const applySettings = useCallback((next: DesktopSettings) => {
+    const previous = settingsRef.current
+    if (previous) {
+      const credentialKeys = [CUSTOM_API_KEY, CUSTOM_BASE_URL, CUSTOM_MODELS, ...ALL.map((vendor) => apiKeySetting(vendor.id)!)]
+      if (credentialKeys.some((key) => previous[key] !== next[key])) {
+        modelCatalogRevisionRef.current += 1
+        setDynamicModels({})
+      }
+    }
+    settingsRef.current = next
+    setSettings(next)
+  }, [])
+
   const settled = status.phase === 'ready' || status.phase === 'failed'
   useEffect(() => {
     // phase 落定之前不能调：会话/设置那些 ipcMain.handle 是 createRuntime
     // 跑完才注册的，早调会砸在 No handler registered 上，而且没人重试。
     if (!settled) return
-    void api.getSettings().then(setSettings).catch((err: unknown) => {
+    void api.getSettings().then(applySettings).catch((err: unknown) => {
       console.error('[settings] 读取失败：', err instanceof Error ? err.message : err)
     })
-  }, [settled])
-  useEffect(() => api.onSettingsChanged(setSettings), [])
+  }, [settled, applySettings])
+  useEffect(() => api.onSettingsChanged(applySettings), [applySettings])
 
   // 设置在右栏渲染，不开第二个窗口。原来是独立 BrowserWindow（照 macOS ⌘,
   // 的原生做法），但这个 app 的设置是「跟着对话调的东西」——改完 key 要回来
@@ -179,8 +212,8 @@ export function App() {
   // onSettingsChanged，那次覆盖是幂等的。
   const saveSettings = useCallback(async (patch: DesktopSettings, unset?: string[]) => {
     const next = await api.saveSettings(patch, unset)
-    setSettings(next)
-  }, [])
+    applySettings(next)
+  }, [applySettings])
 
   const restart = useCallback(async () => {
     await api.restartApp()
@@ -247,22 +280,66 @@ export function App() {
   // 可选项从设置推出来（哪几家配了 key、自定义端点填了哪些模型），
   // 解析逻辑跟主进程共用 main/vendors.ts —— 那个文件不 import electron，
   // 所以两边读的是同一份目录，不会各自推算出不同的清单。
-  const modelCatalog = useMemo(
-    () => (settings ? buildCatalog((key) => settings[key]) : []),
-    [settings],
-  )
   // 当前选中的厂商/模型。设置里没写时退回默认值 —— 跟主进程
   // resolveActiveProvider 的兜底规则一致（config-env.ts），否则选择器显示的
   // 和实际请求用的会是两回事。
   const activeVendor = settings?.ACTIVE_VENDOR || DEFAULT_VENDOR
   const activeModel = settings?.ACTIVE_MODEL || defaultModel(activeVendor) || ''
 
+  const refreshBuiltinModelCatalog = useCallback(async (force = false) => {
+    if (refreshingBuiltinModelsRef.current) return
+    const revision = modelCatalogRevisionRef.current
+    refreshingBuiltinModelsRef.current = true
+    setRefreshingBuiltinModels(true)
+    try {
+      const results: ModelCatalogResult[] = await api.refreshBuiltinModels(force)
+      setDynamicModels((previous) => {
+        if (revision !== modelCatalogRevisionRef.current) return previous
+        const next = { ...previous }
+        for (const result of results) {
+          if (result.models.length > 0 && !result.error) {
+            next[result.vendorId] = result.models.map((model) => ({ ...model }))
+          }
+        }
+        return next
+      })
+    } catch (err) {
+      console.error('[models] 刷新内置模型目录失败：', err instanceof Error ? err.message : err)
+    } finally {
+      refreshingBuiltinModelsRef.current = false
+      setRefreshingBuiltinModels(false)
+    }
+  }, [])
+
+  const modelOverrides = useMemo(() => {
+    const out: Record<string, { id: string; name: string; available?: boolean }[]> = {}
+    for (const [vendorId, models] of Object.entries(dynamicModels)) {
+      out[vendorId] = models.map((model) => ({ ...model }))
+    }
+    const current = out[activeVendor]
+    if (current && activeModel && !current.some((model) => model.id === activeModel)) {
+      current.push({ id: activeModel, name: `${activeModel}（当前已选）`, available: false })
+    }
+    return out
+  }, [dynamicModels, activeVendor, activeModel])
+
+  const modelCatalog = useMemo(
+    () => (settings ? buildCatalog((key) => settings[key], modelOverrides) : []),
+    [settings, modelOverrides],
+  )
+
   // 换模型：一次写两个键（厂商和模型绑在一起，见 ModelPicker 的文件头）。
   // 乐观更新本地副本，让选择器立刻反映点击结果 —— saveSettings 要走一趟
   // 主进程，不先更新的话会看到一下明显的迟滞。主进程随后广播
   // onSettingsChanged，那次覆盖是幂等的。
   const pickModel = useCallback((vendorId: string, modelId: string) => {
-    setSettings((prev) => (prev ? { ...prev, ACTIVE_VENDOR: vendorId, ACTIVE_MODEL: modelId } : prev))
+    const next = settingsRef.current
+      ? { ...settingsRef.current, ACTIVE_VENDOR: vendorId, ACTIVE_MODEL: modelId }
+      : null
+    if (next) {
+      settingsRef.current = next
+      setSettings(next)
+    }
     void api
       .saveSettings({ ACTIVE_VENDOR: vendorId, ACTIVE_MODEL: modelId })
       .catch((err: unknown) => {
@@ -292,8 +369,22 @@ export function App() {
     }
   }, [currentId])
 
-  // 主进程广播的变更（另一个窗口改了、或者配置文件被重新加载）
-  useEffect(() => api.onProvidersChanged(setProviders), [])
+  // 主进程广播的变更（另一个窗口改了、或者配置文件被重新加载）。视图带
+  // sessionId：旧会话的慢刷新不能覆盖当前会话；其他会话的广播到达时，重新
+  // 读取当前视图以拿到共享目录或 provider 配置的更新。
+  useEffect(() => api.onProvidersChanged((view) => {
+    const sessionId = currentIdRef.current
+    if (view.sessionId === sessionId) {
+      setProviders(view)
+      return
+    }
+    if (!sessionId) return
+    void api.getProviders(sessionId).then((next) => {
+      if (currentIdRef.current === sessionId) setProviders(next)
+    }).catch((err: unknown) => {
+      console.error('[providers] 刷新视图失败：', err instanceof Error ? err.message : err)
+    })
+  }), [])
 
   const pickProvider = useCallback(
     (providerId: string) => {
@@ -318,6 +409,43 @@ export function App() {
     },
     [currentId],
   )
+
+  const pickConfigOption = useCallback(
+    (optionId: string, value: string) => {
+      if (!currentId) return
+      // 乐观更新：改这一个选项的 currentValue，让选择器立刻反映点击结果
+      setProviders((prev) => {
+        if (!prev) return prev
+        return {
+          ...prev,
+          configOptions: prev.configOptions.map((o) =>
+            o.id === optionId ? { ...o, currentValue: value } : o,
+          ),
+        }
+      })
+      void api.setSessionConfigOption(currentId, optionId, value).then(setProviders).catch((err: unknown) => {
+        console.error('[providers] 切换配置选项失败：', err instanceof Error ? err.message : err)
+      })
+    },
+    [currentId],
+  )
+
+  const refreshCliModelCatalog = useCallback(async (force = false) => {
+    const sessionId = currentId
+    const providerId = providers?.current
+    if (!sessionId || !providerId || providerId === 'builtin' || refreshingCliModelsRef.current) return
+    refreshingCliModelsRef.current = true
+    setRefreshingCliModels(true)
+    try {
+      const view = await api.refreshCliModels(sessionId, providerId, force)
+      if (currentIdRef.current === sessionId) setProviders(view)
+    } catch (err) {
+      console.error('[providers] 刷新 CLI 模型目录失败：', err instanceof Error ? err.message : err)
+    } finally {
+      refreshingCliModelsRef.current = false
+      setRefreshingCliModels(false)
+    }
+  }, [currentId, providers?.current])
 
   // 启用/停用一个外部 CLI（设置页的开关）。和 pickProvider 同一个约定：
   // 拿主进程返回的完整视图覆盖，不自己推算。
@@ -755,6 +883,8 @@ export function App() {
             startingTask={startingTask}
             taskStartError={taskStartError}
             onAcceptProjectTask={async () => { if (currentId) receiveTask(await api.acceptProjectTask(currentId)) }}
+            onResumeProjectTask={async () => { if (currentId) receiveTask(await api.resumeProjectTask(currentId)) }}
+            onStopProjectTask={() => currentId ? api.cancelMessage(currentId) : Promise.resolve(false)}
             onExportProjectTask={() => currentId ? api.exportProjectTask(currentId) : Promise.resolve(null)}
             capabilities={status.capabilities}
             onOpenRetrievalSettings={() => { setInitialMemoryTab('notes'); setSettingsSection('memory'); setShowSettings(true) }}
@@ -764,10 +894,15 @@ export function App() {
             currentVendor={activeVendor}
             currentModel={activeModel}
             onPickModel={pickModel}
+            onRefreshBuiltinModels={refreshBuiltinModelCatalog}
+            refreshingBuiltinModels={refreshingBuiltinModels}
             onEditResend={editResend}
             providers={providers ?? undefined}
             onPickProvider={pickProvider}
             onPickCliModel={pickCliModel}
+            onRefreshCliModels={refreshCliModelCatalog}
+            refreshingCliModels={refreshingCliModels}
+            onPickConfigOption={pickConfigOption}
             onPickPermission={pickPermission}
           />
         </div>

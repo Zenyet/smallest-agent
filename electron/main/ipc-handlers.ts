@@ -1,4 +1,5 @@
 import { createProjectTaskStore, projectTaskMarkdown } from './project-task-store'
+import { createProjectWorkflowRunner } from './workflows/project-analysis'
 import { validateAttachments } from '../../src/attachments'
 // 唯一允许 import electron 的两个文件之一（另一个是 index.ts）。
 // 这里只做「接线」：把纯模块拼起来挂到 ipcMain 上，不放业务逻辑 ——
@@ -6,7 +7,7 @@ import { validateAttachments } from '../../src/attachments'
 import { dialog, ipcMain, type BrowserWindow } from 'electron'
 import { readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import { CH, type ProvidersView } from '../shared/channels'
+import { CH, type ModelCatalogResult, type ProvidersView } from '../shared/channels'
 import { buildEnv } from './config-env'
 import { getSettings, saveSettings } from './settings-store'
 import { validateSettingsUpdate } from './settings-update'
@@ -19,6 +20,7 @@ import { getProjectsState, setProjectsState } from './projects-store'
 import { getProvidersState, setProvidersState, providersStorePath } from './providers-store'
 import {
   BUILTIN_ID,
+  assignConfigOption,
   assignPermission,
   assignProvider,
   assignModel,
@@ -29,8 +31,10 @@ import {
   providerOptions,
   toggleProvider,
   toPermissionMode,
+  withDiscoveredModels,
 } from './providers'
 import { createProviderRegistry } from './provider/registry'
+import { configuredModelVendorIds, refreshModelCatalog } from './model-catalog'
 import { getAgentsState, setAgentsState, agentsStorePath } from './agents-store'
 import {
   agentForSession,
@@ -42,7 +46,7 @@ import {
   type AgentDef,
 } from './agents'
 import { getFacts, getFactsStrict, rememberFact, forgetFactByKey } from './facts-store'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { createFactEdits } from './fact-edits'
 import {
   forgetSessionAutoTitle,
@@ -91,32 +95,38 @@ export function setupIpcHandlers(
 
   const tasks = createProjectTaskStore(join(paths.sessionsDir, '..', 'tasks.json'),
     (event) => broadcast(CH.projectTaskChanged, event))
-  const activeTasks = new Set<string>()
   const emit: AgentEmitter = {
     chunk: send(CH.messageChunk),
-    toolCall: (event) => {
-      if (activeTasks.has(event.sessionId)) tasks.tool(event)
-      send(CH.toolCall)(event)
-    },
-    complete: (event) => {
-      if (activeTasks.delete(event.sessionId)) tasks.finish(event.sessionId, event.text)
-      send(CH.messageComplete)(event)
-    },
+    toolCall: send(CH.toolCall),
+    complete: send(CH.messageComplete),
     verdict: send(CH.verdict),
     cacheHit: send(CH.cacheHit),
-    error: (event) => {
-      if (activeTasks.delete(event.sessionId)) tasks.stop(event.sessionId, 'failed', event.message)
-      send(CH.error)(event)
-    },
+    error: send(CH.error),
     approvalRequest: send(CH.approvalRequest),
-    cancelled: (event) => {
-      if (activeTasks.delete(event.sessionId)) tasks.stop(event.sessionId, 'stopped', '任务已停止，已保留读取记录。')
-      send(CH.cancelled)(event)
-    },
+    cancelled: send(CH.cancelled),
   }
 
   const readConfig = (options?: { allowMissingApiKey?: boolean }) =>
     loadConfig(buildEnv(process.env, getSettings(), paths), options)
+  const deleting = new Set<string>()
+  const workflows = createProjectWorkflowRunner({
+    tasks, checkpointDir: join(paths.sessionsDir, '..', 'workflows'), loadConfig: readConfig,
+    onReport: async (task, answer) => {
+      const sessions = createJsonSessionStore(paths.sessionsDir)
+      const history = await sessions.load(task.sessionId)
+      // The marker is desktop metadata, ignored by the core model adapter. It
+      // prevents duplicate reports if the app exits between saving and projecting.
+      if (!history.some((message) => 'projectTaskId' in message && message.projectTaskId === task.id)) {
+        const report = { role: 'assistant' as const, content: answer, timestamp: Date.now(), projectTaskId: task.id }
+        await sessions.save(task.sessionId, [...history, report])
+        send(CH.messageComplete)({ sessionId: task.sessionId, text: answer })
+      }
+    },
+  })
+  const assertAvailable = (sessionId: string) => {
+    if (isRestarting()) throw new Error('应用正在重启')
+    if (deleting.has(sessionId)) throw new Error('会话正在删除')
+  }
 
   // 外部 CLI（ACP）的实例缓存。审批复用现有的闸口 —— ACP 的权限请求和内置
   // agent 的写工具审批是同一件事「有后果的动作执行前必须显式确认」，
@@ -130,6 +140,8 @@ export function setupIpcHandlers(
     },
     newRequestId: () => randomUUID(),
   })
+  const cliModelRefreshAt = new Map<string, number>()
+  const cliModelRefreshInFlight = new Map<string, Promise<void>>()
 
   /** 这个会话绑的项目目录。外部 CLI 的 cwd 用它 —— 见设计文档「工作目录」。 */
   const cwdFor = (sessionId: string): string | undefined => {
@@ -161,6 +173,12 @@ export function setupIpcHandlers(
       return providerRegistry.get(state, providerId, modelFor(state, sessionId))
     },
     resolveCwd: cwdFor,
+    resolveConfigOptions: (sessionId) => {
+      const state = getProvidersState()
+      if (providerFor(state, sessionId) === BUILTIN_ID) return []
+      const selected = state.sessionConfigOption[sessionId] ?? {}
+      return Object.entries(selected).map(([optionId, value]) => ({ optionId, value }))
+    },
     resolvePermission: (sessionId) => permissionFor(getProvidersState(), sessionId),
     resolveAgent: (sessionId) => agentForSession(getAgentsState(), sessionId),
     // 能被派活的子 agent：所有没停用的。
@@ -182,6 +200,7 @@ export function setupIpcHandlers(
   // 停止正在跑的那一轮。返回「有没有受理」——目标没在跑就是 false，不抛错。
   // 受理不等于已停：取消是轮边界的，真停下来时会推 cancelled 事件。
   ipcMain.handle(CH.cancelMessage, (_e, sessionId: string) => {
+    if (workflows.cancel(sessionId)) return true
     const accepted = runner.cancel(sessionId)
     // 卡在审批上的那一轮，光置取消标志没用：它停在 gate 里等一个决定，
     // 根本走不到下一个轮边界去看那个标志，于是要悬到 5 分钟超时才结算
@@ -195,15 +214,24 @@ export function setupIpcHandlers(
   })
 
   ipcMain.handle(CH.sendMessage, (_e, sessionId: string, message: string, attachments?: unknown) => {
-    // 重启过程中拒绝新工作：防止 restartApp 的守卫检查通过后、app.quit() 的
-    // before-quit 事件循环间隙里到达的 sendMessage 启动新 turn——那会孤儿化该 turn。
-    if (isRestarting()) {
-      throw new Error('应用正在重启，无法处理新消息')
+    assertAvailable(sessionId)
+    const task = tasks.get(sessionId)
+    if (workflows.isBusy(sessionId) || (task?.workflow && !['review', 'accepted'].includes(task.status))) {
+      throw new Error('请先完成项目分析；也可以新建会话继续聊天')
     }
     return runner.run(sessionId, message, validateAttachments(attachments))
   })
   ipcMain.handle(CH.getProjectTask, (_e, sessionId: string) => tasks.get(sessionId))
-  ipcMain.handle(CH.acceptProjectTask, (_e, sessionId: string) => tasks.accept(sessionId))
+  ipcMain.handle(CH.acceptProjectTask, (_e, sessionId: string) => {
+    assertAvailable(sessionId)
+    if (runner.isBusy(sessionId)) throw new Error('请等待当前对话结束后验收')
+    return tasks.get(sessionId)?.workflow ? workflows.accept(sessionId) : tasks.accept(sessionId)
+  })
+  ipcMain.handle(CH.resumeProjectTask, (_e, sessionId: string) => {
+    assertAvailable(sessionId)
+    if (runner.isBusy(sessionId)) throw new Error('请等待当前对话结束后继续分析')
+    return workflows.resume(sessionId)
+  })
   ipcMain.handle(CH.exportProjectTask, async (_e, sessionId: string) => {
     const task = tasks.get(sessionId)
     if (!task) throw new Error('找不到这个任务')
@@ -223,18 +251,13 @@ export function setupIpcHandlers(
     const config = loadConfig(buildEnv(process.env, getSettings(), paths), { allowMissingApiKey: true })
     if (!config.apiKey) throw new Error('“理解项目”目前使用内置 Agent，请先在「模型连接」中配置 API Key。Codex / Claude Code 订阅可用于普通聊天。')
     const id = newSessionId(Date.now())
-    const task = tasks.create(id, project)
+    const task = tasks.create(id, project, true)
     try {
-      await createJsonSessionStore(paths.sessionsDir).save(id, [])
+      await createJsonSessionStore(paths.sessionsDir).save(id, [{ role: 'user', content: task.prompt, timestamp: task.createdAt }])
       commitProjects(assignSession(getProjectsState(), id, projectId))
       setProvidersState(assignPermission(assignProvider(getProvidersState(), id, BUILTIN_ID), id, 'readonly'))
       lockSessionAutoTitle(id, `理解项目 · ${project.name}`)
-      activeTasks.add(id)
-      void runner.run(id, task.prompt, undefined, { projectOverview: true }).catch((err: unknown) => {
-        activeTasks.delete(id)
-        tasks.stop(id, 'failed', err instanceof Error ? err.message : String(err))
-      })
-      return task
+      return workflows.start(id)
     } catch (err) {
       tasks.stop(id, 'failed', err instanceof Error ? err.message : String(err))
       throw err
@@ -242,6 +265,10 @@ export function setupIpcHandlers(
   })
   ipcMain.handle(CH.getSettings, () => getSettings())
   ipcMain.handle(CH.checkConnection, (_e, vendorId: string) => checkConnection(vendorId, getSettings()))
+  ipcMain.handle(CH.refreshBuiltinModels, async (_e, force?: boolean): Promise<ModelCatalogResult[]> => {
+    const settings = getSettings()
+    return refreshModelCatalog(settings, configuredModelVendorIds(settings), force === true)
+  })
   ipcMain.handle(CH.selectNotesDirectory, async () => {
     const result = await dialog.showOpenDialog(win, { properties: ['openDirectory'], title: '选择笔记目录' })
     return result.canceled ? null : result.filePaths[0] ?? null
@@ -370,59 +397,65 @@ export function setupIpcHandlers(
   })
 
   ipcMain.handle(CH.deleteSession, async (_e, id: string) => {
-    // 正在跑的会话：先停掉再删，不再拒绝用户。
-    //
-    // 原来这里是抛错（DELETE_BLOCKED），理由是「src/ 冻结，runAgent 没有真正的
-    // 取消机制，硬删文件之后 onComplete 的 sessions.save() 还是会照常写回去
-    // （src/memory/store.ts 的 save() 不检查会话是否'应该还存在'），于是那个
-    // '删掉的'会话会带着新写的文件重新出现在侧栏」。
-    //
-    // 现在有取消了（main/cancel.ts）。但**顺序不能反**：取消路径上同样会
-    // sessions.save()，先删文件的话存盘后落地、会话照样复活。所以要
-    // 取消 → 等它彻底停下（含那次存盘）→ 才删。
-    //
-    // rs 侧撞过同一个坑，用 200ms 定时器兜（ui/src/chat.rs 的注释说明了
-    // 为什么不做严格的完成信号：要给 bridge 加一条反向通路，为一个删除时序
-    // 不值）。这边不用猜时间 —— runner 就在主进程内，settled() 给的是
-    // 那一轮真正的 promise。
-    if (runner.isBusy(id)) {
-      runner.cancel(id)
-      // 卡在审批上的话，那一轮停在 gate 里等决定，settled() 会一直悬着。
-      // 先把它名下的审批取消掉（fail-closed 结算成拒绝），那一轮才能推进到
-      // 下一个轮边界看见取消标志。
+    assertAvailable(id)
+    deleting.add(id)
+    try {
+      const task = tasks.get(id)
+      if (task?.workflow) await workflows.remove(task)
+      // 正在跑的会话：先停掉再删，不再拒绝用户。
+      //
+      // 原来这里是抛错（DELETE_BLOCKED），理由是「src/ 冻结，runAgent 没有真正的
+      // 取消机制，硬删文件之后 onComplete 的 sessions.save() 还是会照常写回去
+      // （src/memory/store.ts 的 save() 不检查会话是否'应该还存在'），于是那个
+      // '删掉的'会话会带着新写的文件重新出现在侧栏」。
+      //
+      // 现在有取消了（main/cancel.ts）。但**顺序不能反**：取消路径上同样会
+      // sessions.save()，先删文件的话存盘后落地、会话照样复活。所以要
+      // 取消 → 等它彻底停下（含那次存盘）→ 才删。
+      //
+      // rs 侧撞过同一个坑，用 200ms 定时器兜（ui/src/chat.rs 的注释说明了
+      // 为什么不做严格的完成信号：要给 bridge 加一条反向通路，为一个删除时序
+      // 不值）。这边不用猜时间 —— runner 就在主进程内，settled() 给的是
+      // 那一轮真正的 promise。
+      if (runner.isBusy(id)) {
+        runner.cancel(id)
+        // 卡在审批上的话，那一轮停在 gate 里等决定，settled() 会一直悬着。
+        // 先把它名下的审批取消掉（fail-closed 结算成拒绝），那一轮才能推进到
+        // 下一个轮边界看见取消标志。
+        gate.cancelSession(id)
+        await runner.settled(id)
+      }
+      // 会话被删了，它名下悬着的审批请求也失去意义——不取消的话会占着串行锁直到超时。
+      // 上面那个分支里已经调过一次，这里对没在跑的会话兜底；幂等，重复调用无害。
       gate.cancelSession(id)
-      await runner.settled(id)
-    }
-    // 会话被删了，它名下悬着的审批请求也失去意义——不取消的话会占着串行锁直到超时。
-    // 上面那个分支里已经调过一次，这里对没在跑的会话兜底；幂等，重复调用无害。
-    gate.cancelSession(id)
-    // 会话删了，它的项目映射也是垃圾了。不清的话会在 electron-store 里越攒越多，
-    // 而且将来某个新会话万一拿到同样的 id（进程内的计数器保证不会，但跨重启
-    // 时间戳可能重合）会莫名出现在一个它从没被放进去过的项目下。
-    // forgetSession 对不存在的 sessionId 原样返回同一个对象，所以用引用比较
-    // 就能跳过「这个会话本来就没分组」的常见情况，不必每次删会话都写一次盘、
-    // 广播一次没有变化的状态。注意 before 必须只读一次 —— getProjectsState()
-    // 每次调用都会 normalize 出一个新对象，拿它跟自己比永远不相等。
-    const before = getProjectsState()
-    const after = forgetSession(before, id)
-    if (after !== before) commitProjects(after)
-    // 标题覆盖同理：会话没了它就是垃圾数据。理由见 session-titles.ts 的
-    // forgetSessionTitle —— 不清的话会越攒越多，而且 id 万一重合会让新会话
-    // 莫名带上一个旧名字。
-    forgetSessionTitle(id)
-    // 锁定的自动标题同理 —— 同一个理由（见 session-titles.ts 的 forgetAutoTitle）
-    forgetSessionAutoTitle(id)
-    // provider / 模型 / 权限绑定同理 —— 会话没了它们就是垃圾数据。
-    // 引用比较跳过「本来就没绑过」的常见情况，不必每次删会话都写一次盘
-    const beforeProviders = getProvidersState()
-    const afterProviders = forgetProviderSession(beforeProviders, id)
-    if (afterProviders !== beforeProviders) setProvidersState(afterProviders)
-    // 自定义 agent 的绑定同理
-    const beforeAgents = getAgentsState()
-    const afterAgents = forgetAgentSession(beforeAgents, id)
-    if (afterAgents !== beforeAgents) setAgentsState(afterAgents)
-    await deleteSession(paths.sessionsDir, id)
-    tasks.remove(id)
+      // 会话删了，它的项目映射也是垃圾了。不清的话会在 electron-store 里越攒越多，
+      // 而且将来某个新会话万一拿到同样的 id（进程内的计数器保证不会，但跨重启
+      // 时间戳可能重合）会莫名出现在一个它从没被放进去过的项目下。
+      // forgetSession 对不存在的 sessionId 原样返回同一个对象，所以用引用比较
+      // 就能跳过「这个会话本来就没分组」的常见情况，不必每次删会话都写一次盘、
+      // 广播一次没有变化的状态。注意 before 必须只读一次 —— getProjectsState()
+      // 每次调用都会 normalize 出一个新对象，拿它跟自己比永远不相等。
+      const before = getProjectsState()
+      const after = forgetSession(before, id)
+      if (after !== before) commitProjects(after)
+      // 标题覆盖同理：会话没了它就是垃圾数据。理由见 session-titles.ts 的
+      // forgetSessionTitle —— 不清的话会越攒越多，而且 id 万一重合会让新会话
+      // 莫名带上一个旧名字。
+      forgetSessionTitle(id)
+      // 锁定的自动标题同理 —— 同一个理由（见 session-titles.ts 的 forgetAutoTitle）
+      forgetSessionAutoTitle(id)
+      // provider / 模型 / 权限绑定同理 —— 会话没了它们就是垃圾数据。
+      // 引用比较跳过「本来就没绑过」的常见情况，不必每次删会话都写一次盘
+      const beforeProviders = getProvidersState()
+      const afterProviders = forgetProviderSession(beforeProviders, id)
+      if (afterProviders !== beforeProviders) setProvidersState(afterProviders)
+      // 自定义 agent 的绑定同理
+      const beforeAgents = getAgentsState()
+      const afterAgents = forgetAgentSession(beforeAgents, id)
+      if (afterAgents !== beforeAgents) setAgentsState(afterAgents)
+      await deleteSession(paths.sessionsDir, id)
+      tasks.remove(id)
+    } finally { deleting.delete(id) }
   })
 
   ipcMain.handle(CH.loadSession, (_e, id: string) => createJsonSessionStore(paths.sessionsDir).load(id))
@@ -435,7 +468,7 @@ export function setupIpcHandlers(
   // canEdit 挡了编辑入口，这里是主进程侧的兜底。
   ipcMain.handle(CH.truncateSession, async (_e, id: string, nthUser: number) => {
     const store = createJsonSessionStore(paths.sessionsDir)
-    if (runner.isBusy(id)) return store.load(id)
+    if (runner.isBusy(id) || workflows.isBusy(id) || tasks.get(id)?.workflow) return store.load(id)
     const truncated = truncateAtNthUser(await store.load(id), nthUser)
     await store.save(id, truncated)
     return truncated
@@ -449,10 +482,25 @@ export function setupIpcHandlers(
     const state = getProvidersState()
     const current = providerFor(state, sessionId)
     const entry = state.external.find((e) => e.id === current)
+    // 用户在这个会话选过的配置选项值（没选的走 CLI 自己的默认 currentValue）
+    const selectedConfig = state.sessionConfigOption[sessionId] ?? {}
     return {
+      sessionId,
       options: providerOptions(state),
       current,
-      models: (entry?.models ?? []).map((m) => ({ id: m.id, name: m.name, ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}) })),
+      models: (entry?.models ?? []).map((m) => ({
+        id: m.id,
+        name: m.name,
+        ...(m.contextWindow ? { contextWindow: m.contextWindow } : {}),
+        ...(m.available === false ? { available: false } : {}),
+      })),
+      configOptions: (entry?.configOptions ?? []).map((o) => ({
+        id: o.id,
+        name: o.name,
+        category: o.category,
+        currentValue: selectedConfig[o.id] ?? o.currentValue,
+        options: o.options.map((v) => ({ value: v.value, name: v.name })),
+      })),
       currentModel: modelFor(state, sessionId),
       permission: permissionFor(state, sessionId),
       configPath: providersStorePath(),
@@ -473,6 +521,52 @@ export function setupIpcHandlers(
     broadcast(CH.providersChanged, view)
     return view
   }
+
+  ipcMain.handle(CH.refreshCliModels, async (_e, sessionId: string, providerId: string, force?: boolean) => {
+    if (providerId === BUILTIN_ID) return providersView(sessionId)
+    const state = getProvidersState()
+    const entry = state.external.find((provider) => provider.id === providerId)
+    if (!entry) return providersView(sessionId)
+
+    const launchSettings = JSON.stringify({ command: entry.command, args: entry.args ?? [], env: entry.env ?? {} })
+    const cacheKey = `${providerId}\0${createHash('sha256').update(launchSettings).digest('hex')}`
+    const now = Date.now()
+    const inFlight = cliModelRefreshInFlight.get(cacheKey)
+    if (inFlight) {
+      await inFlight
+      return providersView(sessionId)
+    }
+    const lastRefresh = cliModelRefreshAt.get(cacheKey) ?? 0
+    if (force !== true && now - lastRefresh < 15 * 60 * 1000) return providersView(sessionId)
+
+    const refresh = (async () => {
+      try {
+        const discovered = await providerRegistry.discoverModels(state, providerId, cwdFor(sessionId))
+        cliModelRefreshAt.set(cacheKey, Date.now())
+        if (discovered.models.length === 0 && discovered.configOptions.length === 0) return
+
+        // The CLI might have been reconfigured while its discovery session started.
+        // Apply results only while this provider still points at the same command.
+        const currentState = getProvidersState()
+        const currentEntry = currentState.external.find((provider) => provider.id === providerId)
+        const currentLaunchSettings = currentEntry
+          ? JSON.stringify({ command: currentEntry.command, args: currentEntry.args ?? [], env: currentEntry.env ?? {} })
+          : ''
+        if (!currentEntry || currentLaunchSettings !== launchSettings) {
+          return
+        }
+        commitProviders(withDiscoveredModels(currentState, providerId, discovered, sessionId), sessionId)
+      } catch (error) {
+        cliModelRefreshAt.set(cacheKey, Date.now())
+        throw error
+      } finally {
+        cliModelRefreshInFlight.delete(cacheKey)
+      }
+    })()
+    cliModelRefreshInFlight.set(cacheKey, refresh)
+    await refresh
+    return providersView(sessionId)
+  })
 
   // --- 自定义 agent ---
   //
@@ -546,6 +640,10 @@ export function setupIpcHandlers(
     commitProviders(assignModel(getProvidersState(), sessionId, modelId), sessionId),
   )
 
+  ipcMain.handle(CH.setSessionConfigOption, (_e, sessionId: string, optionId: string, value: string) =>
+    commitProviders(assignConfigOption(getProvidersState(), sessionId, optionId, value), sessionId),
+  )
+
   ipcMain.handle(CH.setSessionPermission, (_e, sessionId: string, mode: string) =>
     commitProviders(
       assignPermission(getProvidersState(), sessionId, toPermissionMode(mode)),
@@ -560,10 +658,11 @@ export function setupIpcHandlers(
   setupProviderHandlers()
 
   return {
-    runningSessionIds: () => runner.runningSessionIds(),
+    runningSessionIds: () => [...runner.runningSessionIds(), ...workflows.runningSessionIds()],
     // app 退出时要收掉那些 npx 子进程 —— 不收的话它们会变成孤儿进程留在
     // 系统里（stdio 的 stderr 是 inherit，父进程没了它们也不会自己退）
     disposeProviders: () => {
+      workflows.close()
       providerRegistry.disposeAll()
       fsPool.disposeAll()
     },

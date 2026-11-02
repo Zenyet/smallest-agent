@@ -73,7 +73,7 @@ export function SettingsNav({
               //
               // 底用 hover-2 而不是 surface —— surface 压在 canvas 上只差一点，
               // 扫一眼看不出自己在哪页（gpui 侧改过同一处）。
-              className={`flex h-10 flex-none cursor-pointer items-center gap-2.5 rounded-control border-none px-3 text-left text-[13px] transition-[color,background-color] duration-150 ${
+              className={`flex h-7 flex-none cursor-pointer items-center gap-1.5 rounded-control border-none px-2 text-left text-[12.5px] transition-[color,background-color] duration-150 ${
                 isActive
                   ? 'bg-hover-2 font-medium text-ink'
                   : 'bg-transparent text-ink-2 hover:bg-hover hover:text-ink'

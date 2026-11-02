@@ -4,6 +4,20 @@
 
 Main 进程 import 现有的 `src/` 跑 agent，Renderer 用 React 画界面，中间靠 IPC 事件推送。**`src/` 一行没改**——这是本目录唯一的硬约束。
 
+## 项目分析工作流（LangGraph）
+
+桌面端新对话中的“理解项目”使用独立的 LangGraph 工作流：扫描文件 → 并行分析结构、运行方法和风险 → 汇总报告 → 人工验收。普通聊天继续使用 `src/agent.ts`。
+
+- `main/workflows/project-analysis.ts` 定义节点、并行汇合与 `interrupt` 验收，并管理启动、停止、恢复和删除。通常调用四次模型，复用设置中的模型、SDK 和重试/降级逻辑；不开放工具或模型原生搜索。
+- `main/workflows/project-scan.ts` 只读扫描所选目录，遵守根目录及嵌套的 `.gitignore`，跳过隐藏文件、敏感文件名、符号链接、依赖和构建产物。最多遍历 2,000 项、深入五层子目录，抽样读取 24 个文本文件，每文件最多 3,000 字符、合计 24,000 字符；界面明确展示抽样与截断情况。
+- `main/workflows/file-checkpointer.ts` 基于固定版本的 LangGraph MemorySaver 持久化检查点与并行节点的 pending writes，使用临时文件、刷盘及原子替换。每个任务单独保存在应用数据目录的 `workflows/` 下，凭据不进入检查点。它使用 Node 内置序列化，不需要 Electron 原生数据库模块。
+- `tasks.json` 保存用于界面展示的任务状态，图检查点保存执行状态。应用重启后未完成的任务显示“已停止”；点击“继续分析”沿用扫描快照和已完成分支，重新执行未完成的节点。待验收报告跨重启保留；“采用成果”通过 `Command({ resume: true })` 恢复验收节点，无需调用模型。
+- 删除会话先取消并等待工作流结束，再删除检查点和任务。工作流进行中禁止同会话的普通聊天写入；报告生成后可以继续提问。
+
+恢复以节点为边界：中断的模型调用可能需要重跑，已落盘的分支不会重复调用。继续使用的是扫描时的快照；需要分析更新后的文件时，应新建项目任务。已有旧版项目成果仍可查看、采用及导出，但不补建检查点。
+
+验证：`pnpm exec vitest run tests/electron/project-workflow.test.ts tests/electron/project-tasks.test.ts tests/electron/project-task-card.test.tsx`。测试使用真实 LangGraph 与磁盘检查点、注入模型响应，覆盖并行执行、失败恢复、取消、跨实例验收、文件排除和界面操作。
+
 ## 为什么要拆成两段装配
 
 `cli.ts` 是「装配 → 跑一次 → 退出」。桌面端长驻，所以装配线拆成两段：

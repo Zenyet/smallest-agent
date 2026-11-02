@@ -41,6 +41,7 @@ import { Readable, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk'
 import { Cancelled } from '../cancel'
 import type { ApprovalDecision, ApprovalRequestEvent } from '../../shared/channels'
+import type { CliConfigOption, CliModel, DiscoveredCatalog } from '../providers'
 import type { Provider, TurnRequest, TurnResult } from './types'
 
 /** 起一个 ACP agent 要知道的东西。resolveLaunch 的输出直接喂进来。 */
@@ -54,6 +55,9 @@ export interface AcpSpec {
   env: Record<string, string>
   /** 子进程的工作目录，同时是 ACP 会话的 cwd */
   cwd?: string
+  /** Selected model exposed through an ACP session config option, if supported. */
+  modelId?: string
+  modelConfigOptionId?: string
 }
 
 export interface AcpDeps {
@@ -112,6 +116,99 @@ function toolOutput(content: acp.ToolCallContent[] | null | undefined): string {
     .join('\n')
 }
 
+function modelsFromConfigOptions(options: acp.SessionConfigOption[] | null | undefined): CliModel[] {
+  const models: CliModel[] = []
+  const seen = new Set<string>()
+  for (const option of options ?? []) {
+    if (option.category !== 'model' || option.type !== 'select') continue
+    const addOption = (candidate: acp.SessionConfigSelectOption) => {
+      if (!candidate.value || seen.has(candidate.value)) return
+      seen.add(candidate.value)
+      models.push({ id: candidate.value, name: candidate.name || candidate.value, configOptionId: option.id })
+    }
+    for (const candidate of option.options) {
+      if ('value' in candidate) addOption(candidate)
+      else for (const nested of candidate.options) addOption(nested)
+    }
+    const currentIndex = models.findIndex((model) => model.id === option.currentValue)
+    if (currentIndex > 0) models.unshift(models.splice(currentIndex, 1)[0])
+  }
+  return models
+}
+
+function modelsFromLegacyResponse(
+  session: acp.ActiveSession,
+  providerId: string,
+): CliModel[] {
+  // Gemini CLI currently publishes its selector as an extension on session/new:
+  // { models: { availableModels: [{ modelId, name }] } }. The ACP SDK keeps this
+  // raw response on ActiveSession even though the field is not in the stable schema.
+  const response = session.newSessionResponse as unknown as {
+    models?: { availableModels?: unknown; currentModelId?: unknown }
+  }
+  const rows = response.models?.availableModels
+  if (!Array.isArray(rows)) return []
+
+  const out: CliModel[] = []
+  const seen = new Set<string>()
+  for (const raw of rows) {
+    if (!raw || typeof raw !== 'object') continue
+    const model = raw as { modelId?: unknown; name?: unknown }
+    if (typeof model.modelId !== 'string' || model.modelId === '' || seen.has(model.modelId)) continue
+    seen.add(model.modelId)
+    out.push({
+      id: model.modelId,
+      name: typeof model.name === 'string' && model.name !== '' ? model.name : model.modelId,
+      // Gemini's ACP model field is still an extension and has no set-config method.
+      // Its CLI supports selecting the same value at process launch.
+      ...(providerId === 'gemini' ? { args: ['--model', model.modelId] } : {}),
+    })
+  }
+  if (typeof response.models?.currentModelId === 'string') {
+    const currentIndex = out.findIndex((model) => model.id === response.models?.currentModelId)
+    if (currentIndex > 0) out.unshift(out.splice(currentIndex, 1)[0])
+  }
+  return out
+}
+
+/**
+ * 从 session 配置选项里挑出**非模型**的 select 选项（思考强度、模式等），
+ * 供前端渲染成可切换的选择器。model 那一类已经走 modelsFromConfigOptions
+ * 变成模型清单了，这里跳过它。
+ */
+function configOptionsFromSessionConfigOptions(
+  options: acp.SessionConfigOption[] | null | undefined,
+): CliConfigOption[] {
+  const out: CliConfigOption[] = []
+  for (const option of options ?? []) {
+    if (option.category === 'model' || option.type !== 'select') continue
+    const values: { value: string; name: string }[] = []
+    const seen = new Set<string>()
+    for (const candidate of option.options) {
+      if ('value' in candidate) {
+        if (seen.has(candidate.value)) continue
+        seen.add(candidate.value)
+        values.push({ value: candidate.value, name: candidate.name || candidate.value })
+      } else {
+        for (const nested of candidate.options) {
+          if (seen.has(nested.value)) continue
+          seen.add(nested.value)
+          values.push({ value: nested.value, name: nested.name || nested.value })
+        }
+      }
+    }
+    if (values.length === 0) continue
+    out.push({
+      id: option.id,
+      name: option.name,
+      category: option.category ?? 'config',
+      currentValue: option.currentValue,
+      options: values,
+    })
+  }
+  return out
+}
+
 /**
  * ACP 的权限选项映射到我们的「允许 / 拒绝」。
  *
@@ -137,7 +234,10 @@ function pickOption(
   return null
 }
 
-export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { dispose(): void } {
+export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & {
+  dispose(): void
+  listModels(cwd?: string): Promise<DiscoveredCatalog>
+} {
   // stderr 是 'inherit'（透传给我们的终端），所以类型上它是 null ——
   // ChildProcessWithoutNullStreams 对不上。写成精确的那个三元组
   let child: ChildProcessByStdio<Writable, Readable, null> | null = null
@@ -291,8 +391,82 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
     // 不理想，但 session/new 没有「不给 cwd」这个选项
     const cwd = req.cwd ?? spec.cwd ?? process.cwd()
     const session = await context.buildSession(cwd).start()
+    if (spec.modelConfigOptionId && spec.modelId) {
+      const modelOption = (session.newSessionResponse.configOptions ?? []).find(
+        (option) => option.id === spec.modelConfigOptionId && option.category === 'model',
+      )
+      if (!modelOption || modelOption.type !== 'select') {
+        session.dispose()
+        await context.request(acp.methods.agent.session.close, { sessionId: session.sessionId }).catch(() => {})
+        throw new Error(`${spec.name} 已不再提供所选模型「${spec.modelId}」，请刷新模型列表后重新选择`)
+      }
+      const advertised = modelOption.options.some((candidate) => {
+        if ('value' in candidate) return candidate.value === spec.modelId
+        return candidate.options.some((nested) => nested.value === spec.modelId)
+      })
+      if (!advertised) {
+        session.dispose()
+        await context.request(acp.methods.agent.session.close, { sessionId: session.sessionId }).catch(() => {})
+        throw new Error(`${spec.name} 已不再提供所选模型「${spec.modelId}」，请刷新模型列表后重新选择`)
+      }
+      if (modelOption.currentValue !== spec.modelId) {
+        try {
+          await context.request(acp.methods.agent.session.setConfigOption, {
+            sessionId: session.sessionId,
+            configId: spec.modelConfigOptionId,
+            value: spec.modelId,
+          })
+        } catch (err) {
+          session.dispose()
+          await context.request(acp.methods.agent.session.close, { sessionId: session.sessionId }).catch(() => {})
+          throw new Error(
+            `${spec.name} 无法切换到模型「${spec.modelId}」：${err instanceof Error ? err.message : String(err)}`,
+            { cause: err },
+          )
+        }
+      }
+    }
+
+    // 应用用户选的其它会话配置选项（思考强度等）。逐个容错：某个选项设置
+    // 失败（CLI 收回了它、或值不合法）不该让整轮失败 —— 退回 CLI 自己的
+    // 默认值，并记一行日志供排查。
+    for (const selection of req.configOptions ?? []) {
+      const option = (session.newSessionResponse.configOptions ?? []).find((o) => o.id === selection.optionId)
+      if (!option || option.type !== 'select') continue
+      const available = option.options.some((candidate) => {
+        if ('value' in candidate) return candidate.value === selection.value
+        return candidate.options.some((nested) => nested.value === selection.value)
+      })
+      if (!available || option.currentValue === selection.value) continue
+      try {
+        await context.request(acp.methods.agent.session.setConfigOption, {
+          sessionId: session.sessionId,
+          configId: selection.optionId,
+          value: selection.value,
+        })
+      } catch (err) {
+        console.error(`[acp:${spec.id}] 设置「${option.name}」失败：`, err instanceof Error ? err.message : err)
+      }
+    }
     sessions.set(req.sessionId, session)
     return { session, fresh: true }
+  }
+
+  async function listModels(cwd?: string): Promise<DiscoveredCatalog> {
+    const context = await ensureConnected()
+    const session = await context.buildSession(cwd ?? spec.cwd ?? process.cwd()).start()
+    try {
+      const options = session.newSessionResponse.configOptions
+      const models = modelsFromConfigOptions(options)
+      const configOptions = configOptionsFromSessionConfigOptions(options)
+      return {
+        models: models.length > 0 ? models : modelsFromLegacyResponse(session, spec.id),
+        configOptions,
+      }
+    } finally {
+      await context.request(acp.methods.agent.session.close, { sessionId: session.sessionId }).catch(() => {})
+      session.dispose()
+    }
   }
 
   return {
@@ -435,11 +609,15 @@ export function createAcpProvider(spec: AcpSpec, deps: AcpDeps): Provider & { di
       }
     },
 
+    /** Probe the CLI's live ACP session model selector without sending a prompt. */
+    listModels,
+
     /** 关掉子进程。app 退出、或这个 provider 被从配置里删掉时调。 */
     dispose(): void {
       const proc = child
+      const connection = conn
       reset()
-      conn?.close()
+      connection?.close()
       // SIGTERM 而不是 kill()：给 CLI 一个机会收尾（它可能正在写自己的
       // 会话文件）。它不理的话进程退出时操作系统会收掉
       proc?.kill('SIGTERM')

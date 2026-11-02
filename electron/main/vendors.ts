@@ -322,6 +322,8 @@ export interface ModelChoice {
   contextWindow?: number
   id: string
   name: string
+  /** A previously selected model that the latest provider catalog no longer advertises. */
+  available?: boolean
 }
 
 /** 一个厂商解析之后的样子——内置九家和自定义端点在这里同形。 */
@@ -431,10 +433,20 @@ export function entry(id: string, get: Lookup): VendorEntry | undefined {
  * 它会报出缺的具体是什么（key 还是地址）。列表这边宽松、调用那边严格，
  * 是因为反过来会得到「我的模型填了怎么不出现」这种查不下去的现象。
  */
-export function catalog(get: Lookup): VendorEntry[] {
-  const out = ALL.map((v) => entry(v.id, get)!).filter(Boolean)
+export function catalog(
+  get: Lookup,
+  modelOverrides: Readonly<Record<string, readonly ModelChoice[]>> = {},
+): VendorEntry[] {
+  const out = ALL.map((v) => {
+    const base = entry(v.id, get)!
+    const models = modelOverrides[v.id]
+    return models ? { ...base, models: models.map((model) => ({ ...model })) } : base
+  }).filter(Boolean)
   const custom = entry(CUSTOM_ID, get)
-  if (custom && custom.models.length > 0) out.push(custom)
+  const customModels = modelOverrides[CUSTOM_ID]
+  if (custom && (custom.models.length > 0 || (customModels?.length ?? 0) > 0)) {
+    out.push({ ...custom, ...(customModels ? { models: customModels.map((model) => ({ ...model })) } : {}) })
+  }
   return out
 }
 

@@ -116,6 +116,11 @@ export interface RunnerDeps {
    */
   resolveCwd?: (sessionId: string) => string | undefined
   /**
+   * 这个会话选的非模型配置选项（思考强度等）。只对外部 CLI 有意义 ——
+   * 创建 ACP 会话时逐个应用。不传 = 空，即用 CLI 自己的默认值。
+   */
+  resolveConfigOptions?: (sessionId: string) => { optionId: string; value: string }[]
+  /**
    * 这个会话的权限模式（只对内置 agent 有意义 —— 外部 CLI 自带权限模型）。
    * 不传 = 'ask'，也就是原来的行为。
    */
@@ -519,6 +524,7 @@ export function createAgentRunner(deps: RunnerDeps): AgentRunner {
           // 应用过自定义 agent 预设的那份（没绑 agent 时就是原样）
           config: turnConfig,
           cwd: deps.resolveCwd?.(sessionId),
+          configOptions: deps.resolveConfigOptions?.(sessionId),
           emit: onEvent,
           token,
           // 存盘也要过闸：用户点停止之后这一轮的答案不该进历史 ——

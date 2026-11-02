@@ -323,6 +323,11 @@ app.whenReady().then(async () => {
     traceStartup('runtime-ready')
     sendStatus(runtimeStatus)
 
+    // 加载磁盘上的模型目录缓存（用户手动刷新时写进去的），让重启后选择器
+    // 不用重新拉。这里**不自动拉取** —— 同步交给用户手动点「刷新模型列表」。
+    const { initModelCatalogCache } = await import('./model-catalog')
+    initModelCatalogCache(app.getPath('userData'))
+
     // 健康路径的重启：只允许在没有活跃工作（运行中的 turn 或待审批）时调用。
     // Task 14 把 restartApp 移到失败态专用是为了避免不加防护的"随时可 quit"——
     // 这里在成功路径重新注册它，但加上守卫：如果有 turn 在跑或审批悬着，拒绝并告知原因，

@@ -9,6 +9,7 @@ export const CH = {
   // Renderer → Main（invoke，有返回值）
   ping: 'agent:ping',
   startProjectTask: 'agent:start-project-task',
+  resumeProjectTask: 'agent:resume-project-task',
   getProjectTask: 'agent:get-project-task',
   acceptProjectTask: 'agent:accept-project-task',
   exportProjectTask: 'agent:export-project-task',
@@ -28,6 +29,7 @@ export const CH = {
   getSettings: 'agent:get-settings',
   getSettingsStatus: 'agent:get-settings-status',
   checkConnection: 'agent:check-connection',
+  refreshBuiltinModels: 'agent:refresh-builtin-models',
   selectNotesDirectory: 'agent:select-notes-directory',
   saveSettings: 'agent:save-settings',
   restartApp: 'agent:restart-app',
@@ -87,6 +89,8 @@ export const CH = {
   getProviders: 'agent:get-providers',
   setSessionProvider: 'agent:set-session-provider',
   setSessionModel: 'agent:set-session-model',
+  setSessionConfigOption: 'agent:set-session-config-option',
+  refreshCliModels: 'agent:refresh-cli-models',
   setSessionPermission: 'agent:set-session-permission',
   /** 启用/停用一个外部 CLI（写顶层黑名单 disabledProviders） */
   toggleProvider: 'agent:toggle-provider',
@@ -266,12 +270,25 @@ export interface AgentsView {
  * 而 renderer 只需要「有哪些可选、当前是哪个」。少送就是少一条泄漏路径。
  */
 export interface ProvidersView {
+  /** 会话级视图所属的会话，避免异步广播覆盖另一个会话的选择器状态。 */
+  sessionId?: string
   /** 选择器里列哪些（内置永远第一个，disabled 的已经滤掉） */
   options: { id: string; name: string; external: boolean }[]
   /** 当前会话绑的 provider id */
   current: string
   /** 当前 provider 声明的模型清单。内置和没声明的给空数组 */
-  models: { id: string; name: string; contextWindow?: number }[]
+  models: { id: string; name: string; contextWindow?: number; available?: boolean }[]
+  /**
+   * 当前 provider 暴露的非模型会话配置选项（思考强度、模式等）。
+   * 内置和没声明的给空数组。
+   */
+  configOptions: {
+    id: string
+    name: string
+    category: string
+    currentValue: string
+    options: { value: string; name: string }[]
+  }[]
   /** 当前选中的模型 id。没有可选模型时是 undefined */
   currentModel?: string
   /** 当前会话的权限模式（只对内置 agent 有意义） */
@@ -305,6 +322,14 @@ export interface ProviderSecret {
   apiKey: string
   baseUrl?: string
   model?: string
+}
+
+export interface ModelCatalogResult {
+  vendorId: string
+  models: { id: string; name: string }[]
+  fetchedAt: number
+  cached?: boolean
+  error?: string
 }
 
 // 项目分组的类型从 main/projects.ts 转出来，让 renderer 只 import 这一个文件

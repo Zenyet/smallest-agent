@@ -31,12 +31,16 @@ export function ModelPicker({
   currentVendor,
   currentModel,
   onPick,
+  onRefresh,
+  refreshing = false,
 }: {
   catalog: VendorEntry[]
   currentVendor: string
   currentModel: string
   /** 一次给出厂商和模型 —— 它们绑在一起，见文件头 */
   onPick: (vendorId: string, modelId: string) => void
+  onRefresh?: (force: boolean) => void
+  refreshing?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const ref = useRef<HTMLDivElement>(null)
@@ -140,6 +144,17 @@ export function ModelPicker({
         // 边界一律走 ring —— 见 styles.css 文件头第 2 条。
         className="fixed max-h-[320px] min-w-[200px] flex-col overflow-y-auto rounded-card bg-overlay p-1 text-[12px] shadow-overlay open:flex"
       >
+        <button
+          type="button"
+          aria-label="刷新模型列表"
+          title="刷新模型列表"
+          disabled={refreshing}
+          onClick={() => onRefresh?.(true)}
+          className="flex h-7 flex-none items-center gap-1 rounded-chip border-none bg-transparent px-2 text-[11px] text-ink-3 hover:bg-overlay-hover hover:text-ink disabled:cursor-wait"
+        >
+          <Icon name="refresh" size={11} className={refreshing ? 'animate-spin' : ''} />
+          <span>{refreshing ? '正在同步…' : '刷新模型列表'}</span>
+        </button>
         {catalog.map((entry, gi) => (
           <div key={entry.id} className="contents">
             {/* ## 一级（厂商）和二级（模型）怎么分开
@@ -171,6 +186,7 @@ export function ModelPicker({
                   type="button"
                   role="option"
                   aria-selected={isCurrent}
+                  disabled={m.available === false}
                   onClick={() => {
                     setOpen(false)
                     onPick(entry.id, m.id)
@@ -183,7 +199,7 @@ export function ModelPicker({
                     isCurrent
                       ? 'bg-accent-tint text-ink'
                       : 'bg-transparent text-ink-2 hover:bg-overlay-hover hover:text-ink'
-                  }`}
+                  } ${m.available === false ? 'cursor-not-allowed opacity-45 hover:bg-transparent hover:text-ink-2' : ''}`}
                 >
                   <span className="truncate">{m.name}</span>
                   {isCurrent && (

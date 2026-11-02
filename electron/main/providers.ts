@@ -29,28 +29,7 @@ export const BUILTIN_ID = 'builtin'
 
 export const BUILTIN_NAME = '内置 agent'
 
-/**
- * 外部 CLI 的一个模型选择。
- *
- * ## 为什么模型要用户配，而不是问 CLI
- *
- * **ACP 协议里没有模型选择。** 查过 SDK 1.4.0 的 schema：SessionUpdate 有
- * `current_mode_update`（ask / architect 那种工作模式），没有 available_models。
- * 有一组 `providers/list` / `providers/set`，但它标着 UNSTABLE（"not part of
- * the spec yet, and may be removed or changed at any point"），而且答的是
- * 「LLM 路由怎么配」不是「有哪些模型可选」。所以客户端问不出来。
- *
- * 各家 CLI 的做法是读环境变量或命令行参数（`ANTHROPIC_MODEL`、`--model`）。
- * 所以让用户声明「有哪些选择、每个怎么传」，我们在起子进程时应用上。
- *
- * 代价是清单会过期（各家出新模型要用户自己加一行）。换来的是**不用为每家
- * CLI 写一个适配器** —— waku 走的是那条路（12 个 driver 文件），因为它用
- * 各家原生协议、要拿到各家独有能力。
- *
- * 名字叫 CliModel 而不是 ModelChoice：vendors.ts 已经有一个 ModelChoice
- * （内置厂商的模型，只有 id/name），两者不是一回事 —— 那个的 id 是我们
- * 自己发 HTTP 时用的模型名，这个的 id 是要塞进别人进程的字符串。
- */
+/** 外部 CLI 模型：可由 ACP 会话配置动态发现，也保留 env/args 静态兜底。 */
 export interface CliModel {
   /** Configured context capacity for this exact CLI model. */
   contextWindow?: number
@@ -61,6 +40,45 @@ export interface CliModel {
   env?: Record<string, string>
   /** 追加的命令行参数（`["--model", "gpt-5.2"]`）。Codex 那套走这条。 */
   args?: string[]
+  /** ACP session config option id for models discovered from the CLI. */
+  configOptionId?: string
+  /** False when a previously selected model disappeared from the latest ACP catalog. */
+  available?: boolean
+}
+
+/**
+ * 外部 CLI 的会话配置选项（思考强度、模式等，**不含模型**）。
+ *
+ * 由 ACP 的 session/new 响应里的 configOptions 发现。category 是协议给的
+ * 语义分类（thought_level / mode / model_config / …），model 那一类已经
+ * 被当成「模型清单」处理（见 CliModel.configOptionId），剩下的才是这些。
+ */
+export interface CliConfigOption {
+  /** 配置选项 id，切换时用。 */
+  id: string
+  /** 显示名（「思考强度」）。 */
+  name: string
+  /** 协议分类，用于前端分组/图标，未知分类也要能显示。 */
+  category: string
+  /** 当前值。 */
+  currentValue: string
+  /** 可选值。 */
+  options: { value: string; name: string }[]
+}
+
+/**
+ * category 的显示名。ACP 给的是英文标识符（thought_level / mode / …），
+ * UI 上要给人看的中文。认不出的分类原样返回 —— 宁可露一个英文词，
+ * 也不编一个可能误导的译名。
+ */
+const CONFIG_OPTION_CATEGORY_LABELS: Record<string, string> = {
+  thought_level: '思考强度',
+  mode: '模式',
+  model_config: '模型配置',
+}
+
+export function configOptionCategoryLabel(category: string): string {
+  return CONFIG_OPTION_CATEGORY_LABELS[category] ?? category
 }
 
 /** 一个外部 CLI provider 的定义。 */
@@ -99,6 +117,8 @@ export interface ExternalProvider {
   disabled?: boolean
   /** 这个 CLI 支持哪些模型。空表示不提供选择（用它的默认模型）。 */
   models?: CliModel[]
+  /** ACP 发现的非模型会话配置选项（思考强度等）。 */
+  configOptions?: CliConfigOption[]
 }
 
 /**
@@ -183,6 +203,11 @@ export interface ProvidersState {
   builtinModel: Record<string, string>
   /** sessionId → 权限模式。只对内置 agent 有意义 —— 外部 CLI 自带权限模型。 */
   sessionPermission: Record<string, PermissionMode>
+  /**
+   * sessionId → (configOptionId → value)。外部 CLI 的非模型会话配置
+   * （思考强度等）。只在用户显式选过时记，没记的用 CLI 自己的默认值。
+   */
+  sessionConfigOption: Record<string, Record<string, string>>
   /** 新会话默认用哪个。 */
   defaultProvider?: string
   /**
@@ -203,6 +228,7 @@ export function emptyProvidersState(): ProvidersState {
     sessionModel: {},
     builtinModel: {},
     sessionPermission: {},
+    sessionConfigOption: {},
     disabledProviders: [],
   }
 }
@@ -240,6 +266,34 @@ function normalizeCliModel(raw: unknown): CliModel | null {
     name: typeof m.name === 'string' && m.name !== '' ? m.name : m.id,
     ...(Object.keys(strRecord(m.env)).length > 0 ? { env: strRecord(m.env) } : {}),
     ...(args.length > 0 ? { args } : {}),
+    ...(typeof m.configOptionId === 'string' && m.configOptionId !== ''
+      ? { configOptionId: m.configOptionId }
+      : {}),
+    ...(m.available === false ? { available: false } : {}),
+  }
+}
+
+function normalizeCliConfigOption(raw: unknown): CliConfigOption | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Partial<CliConfigOption>
+  if (typeof o.id !== 'string' || o.id === '') return null
+  const options = Array.isArray(o.options)
+    ? o.options
+      .filter((v): v is { value: string; name: string } =>
+        !!v && typeof v === 'object' && typeof (v as { value?: unknown }).value === 'string' && (v as { value?: unknown }).value !== '')
+      .map((v) => ({
+        value: v.value,
+        name: typeof v.name === 'string' && v.name !== '' ? v.name : v.value,
+      }))
+    : []
+  // 没可选值的选择器没有意义（没得选），丢整条
+  if (options.length === 0) return null
+  return {
+    id: o.id,
+    name: typeof o.name === 'string' && o.name !== '' ? o.name : o.id,
+    category: typeof o.category === 'string' && o.category !== '' ? o.category : 'config',
+    currentValue: typeof o.currentValue === 'string' ? o.currentValue : options[0].value,
+    options,
   }
 }
 
@@ -268,6 +322,9 @@ function normalizeExternal(raw: unknown): ExternalProvider | null {
   ) {
     models = codexModels()
   }
+  const configOptions = Array.isArray(p.configOptions)
+    ? p.configOptions.map(normalizeCliConfigOption).filter((o): o is CliConfigOption => o !== null)
+    : []
   return {
     id: p.id,
     name: typeof p.name === 'string' && p.name !== '' ? p.name : p.id,
@@ -279,6 +336,7 @@ function normalizeExternal(raw: unknown): ExternalProvider | null {
     // disabledProviders 了（见那边的迁移段）。这里再留一份的话，
     // 用户之后想启用某家就得两个地方都改 —— 而他只看得到一个。
     ...(models.length > 0 ? { models } : {}),
+    ...(configOptions.length > 0 ? { configOptions } : {}),
   }
 }
 
@@ -345,6 +403,26 @@ export function normalizeProvidersState(raw: unknown): ProvidersState {
     }
   }
 
+  // 配置选项绑定和模型绑定一样要两步查：先知道会话绑哪个 provider，
+  // 才能判断 optionId / value 是否还合法（provider 换过、选项被 CLI 收回去）。
+  const sessionConfigOption: Record<string, Record<string, string>> = {}
+  if (obj.sessionConfigOption && typeof obj.sessionConfigOption === 'object') {
+    for (const [sid, opts] of Object.entries(obj.sessionConfigOption)) {
+      const pid = sessionProvider[sid]
+      if (!pid || pid === BUILTIN_ID) continue
+      const provider = external.find((e) => e.id === pid)
+      if (!provider?.configOptions || provider.configOptions.length === 0) continue
+      if (!opts || typeof opts !== 'object') continue
+      const cleaned: Record<string, string> = {}
+      for (const [optionId, value] of Object.entries(opts as Record<string, unknown>)) {
+        if (typeof value !== 'string') continue
+        const option = provider.configOptions.find((o) => o.id === optionId)
+        if (option && option.options.some((v) => v.value === value)) cleaned[optionId] = value
+      }
+      if (Object.keys(cleaned).length > 0) sessionConfigOption[sid] = cleaned
+    }
+  }
+
   const defaultProvider =
     typeof obj.defaultProvider === 'string' && known.has(obj.defaultProvider)
       ? obj.defaultProvider
@@ -389,6 +467,7 @@ export function normalizeProvidersState(raw: unknown): ProvidersState {
     sessionModel,
     builtinModel,
     sessionPermission,
+    sessionConfigOption,
     disabledProviders: [...disabled],
     ...(defaultProvider ? { defaultProvider } : {}),
   }
@@ -407,6 +486,97 @@ export function providerFor(state: ProvidersState, sessionId: string): string {
 export function modelsFor(state: ProvidersState, providerId: string): CliModel[] {
   if (providerId === BUILTIN_ID) return []
   return state.external.find((e) => e.id === providerId)?.models ?? []
+}
+
+/** 这个 provider 声明了哪些非模型会话配置选项（思考强度等）。 */
+export function configOptionsFor(state: ProvidersState, providerId: string): CliConfigOption[] {
+  if (providerId === BUILTIN_ID) return []
+  return state.external.find((e) => e.id === providerId)?.configOptions ?? []
+}
+
+/**
+ * 这个会话的某个配置选项选的值。没选过返回 undefined（调用方用 CLI 默认值）。
+ */
+export function configOptionValueFor(
+  state: ProvidersState,
+  sessionId: string,
+  optionId: string,
+): string | undefined {
+  return state.sessionConfigOption[sessionId]?.[optionId]
+}
+
+/** ACP 发现的结果：模型清单 + 非模型配置选项，一起替换进 provider 缓存。 */
+export interface DiscoveredCatalog {
+  models: CliModel[]
+  configOptions: CliConfigOption[]
+}
+
+/**
+ * Replace a CLI's cached catalog and keep any selected-but-removed entry visible.
+ *
+ * 模型清单用「新的全量 + 保留已选但消失的」策略；配置选项（思考强度等）则
+ * 只在拿到非空结果时覆盖，空结果保留旧的 —— 探测偶尔拿不到不该把已有选项
+ * 抹掉。
+ */
+export function withDiscoveredModels(
+  state: ProvidersState,
+  providerId: string,
+  discovered: DiscoveredCatalog,
+  activeSessionId?: string,
+): ProvidersState {
+  const providerIndex = state.external.findIndex((provider) => provider.id === providerId)
+  if (providerIndex < 0) return state
+  const { models: discoveredModels, configOptions: discoveredConfigOptions } = discovered
+  if (discoveredModels.length === 0 && discoveredConfigOptions.length === 0) return state
+
+  const provider = state.external[providerIndex]
+  const existing = provider.models ?? []
+  const fresh = discoveredModels.map((model) => ({ ...model, available: true }))
+  const freshIds = new Set(fresh.map((model) => model.id))
+  const selectedIds = new Set<string>()
+  const sessionModel = { ...state.sessionModel }
+  const sessionIds = new Set([...Object.keys(state.sessionProvider), ...(activeSessionId ? [activeSessionId] : [])])
+  for (const sessionId of sessionIds) {
+    if (providerFor(state, sessionId) !== providerId) continue
+    const modelId = modelFor(state, sessionId)
+    if (modelId) {
+      selectedIds.add(modelId)
+      if (!sessionModel[sessionId]) sessionModel[sessionId] = modelId
+    }
+  }
+  const preserved = existing
+    .filter((model) => !freshIds.has(model.id) && (model.id === 'default' || selectedIds.has(model.id)))
+    .map((model) => ({ ...model, available: model.id === 'default' }))
+  const models = [
+    ...preserved.filter((model) => model.id === 'default'),
+    ...fresh,
+    ...preserved.filter((model) => model.id !== 'default'),
+  ]
+
+  // 配置选项：新发现覆盖旧的，同时清掉指向已消失 option 的绑定。
+  const configOptions = discoveredConfigOptions.map((o) => ({ ...o }))
+  const optionIds = new Set(configOptions.map((o) => o.id))
+  const sessionConfigOption = { ...state.sessionConfigOption }
+  for (const [sid, opts] of Object.entries(sessionConfigOption)) {
+    if (providerFor(state, sid) !== providerId) continue
+    const cleaned: Record<string, string> = {}
+    for (const [optionId, value] of Object.entries(opts)) {
+      if (optionIds.has(optionId)) cleaned[optionId] = value
+    }
+    if (Object.keys(cleaned).length > 0) sessionConfigOption[sid] = cleaned
+    else delete sessionConfigOption[sid]
+  }
+
+  return {
+    ...state,
+    sessionModel,
+    sessionConfigOption,
+    external: state.external.map((item, index) =>
+      index === providerIndex
+        ? { ...item, models, ...(configOptions.length > 0 ? { configOptions } : {}) }
+        : item,
+    ),
+  }
 }
 
 /**
@@ -504,7 +674,14 @@ export function resolveLaunch(
   state: ProvidersState,
   providerId: string,
   modelId?: string,
-): { command: string; args: string[]; env: Record<string, string>; cwd?: string } | null {
+): {
+  command: string
+  args: string[]
+  env: Record<string, string>
+  cwd?: string
+  modelId?: string
+  modelConfigOptionId?: string
+} | null {
   const p = state.external.find((e) => e.id === providerId)
   if (!p) return null
   const model = modelId ? p.models?.find((m) => m.id === modelId) : undefined
@@ -513,6 +690,9 @@ export function resolveLaunch(
     args: [...(p.args ?? []), ...(model?.args ?? [])],
     env: { ...(p.env ?? {}), ...(model?.env ?? {}) },
     ...(p.cwd ? { cwd: p.cwd } : {}),
+    ...(model?.configOptionId
+      ? { modelId: model.id, modelConfigOptionId: model.configOptionId }
+      : {}),
   }
 }
 
@@ -535,6 +715,12 @@ export function assignProvider(
     delete sessionModel[sessionId]
     next.sessionModel = sessionModel
   }
+  // 配置选项和模型一样只在其所属 provider 里有意义，换引擎一并清掉
+  if (sessionId in next.sessionConfigOption) {
+    const sessionConfigOption = { ...next.sessionConfigOption }
+    delete sessionConfigOption[sessionId]
+    next.sessionConfigOption = sessionConfigOption
+  }
   return next
 }
 
@@ -544,6 +730,21 @@ export function assignModel(
   modelId: string,
 ): ProvidersState {
   return { ...state, sessionModel: { ...state.sessionModel, [sessionId]: modelId } }
+}
+
+/** 记住这个会话某个配置选项（思考强度等）选的值。 */
+export function assignConfigOption(
+  state: ProvidersState,
+  sessionId: string,
+  optionId: string,
+  value: string,
+): ProvidersState {
+  const prev = state.sessionConfigOption[sessionId] ?? {}
+  const nextSession = { ...prev, [optionId]: value }
+  return {
+    ...state,
+    sessionConfigOption: { ...state.sessionConfigOption, [sessionId]: nextSession },
+  }
 }
 
 /** value 的形状是 `厂商id/模型id`。 */
@@ -572,7 +773,7 @@ export function assignPermission(
 }
 
 /**
- * 会话被删了，它名下的四种绑定都是垃圾。
+ * 会话被删了，它名下的五种绑定都是垃圾。
  *
  * 不清的话会在 electron-store 里越攒越多，而且将来某个新会话万一拿到同样的
  * id 会莫名带着别人的引擎设置（和 projects.ts 的 forgetSession 同一条理由）。
@@ -584,17 +785,20 @@ export function forgetSession(state: ProvidersState, sessionId: string): Provide
     sessionId in state.sessionProvider ||
     sessionId in state.sessionModel ||
     sessionId in state.builtinModel ||
-    sessionId in state.sessionPermission
+    sessionId in state.sessionPermission ||
+    sessionId in state.sessionConfigOption
   if (!has) return state
   const sessionProvider = { ...state.sessionProvider }
   const sessionModel = { ...state.sessionModel }
   const builtinModel = { ...state.builtinModel }
   const sessionPermission = { ...state.sessionPermission }
+  const sessionConfigOption = { ...state.sessionConfigOption }
   delete sessionProvider[sessionId]
   delete sessionModel[sessionId]
   delete builtinModel[sessionId]
   delete sessionPermission[sessionId]
-  return { ...state, sessionProvider, sessionModel, builtinModel, sessionPermission }
+  delete sessionConfigOption[sessionId]
+  return { ...state, sessionProvider, sessionModel, builtinModel, sessionPermission, sessionConfigOption }
 }
 
 // ============================================================================
@@ -632,10 +836,10 @@ function codexModels(): CliModel[] {
  * 而错误看着像我们的问题。哪天有了加一行就行 —— 这正是「清单是用户可改的
  * 配置文件」而不是硬编码的理由。
  *
- * ## 模型清单会过期
+ * ## 静态模型是兜底
  *
- * 这是**用户可改的模板**，不是权威清单 —— ACP 查不到模型（见 CliModel 的
- * 注释），各家出新模型时自己加一行。
+ * 选择器打开时会尝试从 ACP session config options 读取 CLI 当前支持的模型；
+ * Gemini CLI 旧格式也会被读取。这里的模板在 discovery 暂不可用时保留给用户使用。
  *
  * 1M 上下文用 id 后缀表达（`claude-opus-5[1m]`）而不是单独的选项维度：
  * 那样需要一个嵌套的选择 UI，摊平成独立条目多几行就够了。只给顶配加，

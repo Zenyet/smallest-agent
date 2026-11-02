@@ -55,34 +55,47 @@ export function SettingsPanel({ settings, activeSection, providers, onToggleProv
       <header className="st-page-header"><h2>{section.label}</h2><p>{section.description}</p></header>
       {visited.current.has('provider') && <div hidden={activeSection !== 'provider'}><ConnectionSettings form={form} status={status} available={runtimeStatus?.phase !== 'failed'} /></div>}
       {visited.current.has('agents') && <div hidden={activeSection !== 'agents'}>
-        <div className="st-section-head"><h3>执行引擎</h3><span className="st-hint">启用后可在对话中选择</span></div>
-        <div className="st-row"><span className="st-mark"><Icon name="bot" size={17} /></span><div className="st-grow"><strong>内置 Agent</strong><p className="st-hint">使用「模型连接」中的配置</p></div><span className="st-badge">{providers?.current === 'builtin' ? '当前会话' : '始终启用'}</span></div>
-        {providers?.allProviders?.map(p => <div className="st-row" key={p.id}><div className="st-grow"><label htmlFor={`provider-${p.id}`}>{p.name}</label><p className="st-hint">{p.enabled ? '已启用；启动时检查本机环境' : '未启用'}{p.id === providers.current ? ' · 当前会话' : ''}</p></div>
-          {onToggleProvider && <SettingsSwitch id={`provider-${p.id}`} aria-label={`${p.enabled ? '停用' : '启用'} ${p.name}`} checked={p.enabled} disabled={providerBusy === p.id} onCheckedChange={enabled => {
-            setProviderBusy(p.id)
-            void runAction(async () => { await onToggleProvider(p.id, enabled) }).finally(() => setProviderBusy(null))
-          }} />}</div>)}
-        <SettingsDisclosure className="st-details" title="添加引擎与权限说明"><p>外部 CLI 使用各自的登录、工具和权限设置。Codex / Claude Code 已通过订阅登录时，无需在「模型连接」中填写 API Key。首次使用可能需要准备适配器；启用不代表已经安装或登录。</p><p>新增引擎可编辑配置文件，重启应用后生效。</p><p className="st-code">{providers?.configPath ?? '配置路径暂不可用'}</p></SettingsDisclosure>
-        <div className="st-section-head"><h3>内置 Agent 能力</h3></div>{field('SUBAGENT')}
-        <div className="st-section-head"><h3>网络搜索</h3></div><p className="st-hint">选择一家配置即可；未配置时使用基础搜索。若两家都有凭据，按现有搜索策略选择。</p>
-        <div className="st-field st-spaced"><span>搜索服务</span><SettingsSelect aria-label="搜索服务" value={searchService} onValueChange={setSearchService} options={[{ value: "BRAVE_API_KEY", label: "Brave Search" }, { value: "TAVILY_API_KEY", label: "Tavily" }]} /></div>
-        {field(searchService)}<SaveActions names={[searchService]} form={form} /><TechnicalFields names={['SUBAGENT', 'BRAVE_API_KEY', 'TAVILY_API_KEY']} />
+        <section className="st-setting-section">
+          <div className="st-section-head"><h3>执行引擎</h3><span className="st-hint">启用后可在对话中选择</span></div>
+          <div className="st-card">
+            <div className="st-row"><span className="st-mark"><Icon name="bot" size={17} /></span><div className="st-grow"><strong>内置 Agent</strong><p className="st-hint">使用「模型连接」中的配置</p></div><span className="st-badge">{providers?.current === 'builtin' ? '当前会话' : '始终启用'}</span></div>
+            {providers?.allProviders?.map(p => <div className="st-row" key={p.id}><div className="st-grow"><label htmlFor={`provider-${p.id}`}>{p.name}</label><p className="st-hint">{p.enabled ? '已启用；启动时检查本机环境' : '未启用'}{p.id === providers.current ? ' · 当前会话' : ''}</p></div>
+              {onToggleProvider && <SettingsSwitch id={`provider-${p.id}`} aria-label={`${p.enabled ? '停用' : '启用'} ${p.name}`} checked={p.enabled} disabled={providerBusy === p.id} onCheckedChange={enabled => {
+                setProviderBusy(p.id)
+                void runAction(async () => { await onToggleProvider(p.id, enabled) }).finally(() => setProviderBusy(null))
+              }} />}</div>)}
+            <SettingsDisclosure className="st-details" title="添加引擎与权限说明"><p>外部 CLI 使用各自的登录、工具和权限设置。Codex / Claude Code 已通过订阅登录时，无需在「模型连接」中填写 API Key。首次使用可能需要准备适配器；启用不代表已经安装或登录。</p><p>新增引擎可编辑配置文件，重启应用后生效。</p><p className="st-code">{providers?.configPath ?? '配置路径暂不可用'}</p></SettingsDisclosure>
+          </div>
+        </section>
+        <section className="st-setting-section">
+          <div className="st-section-head"><h3>内置 Agent 能力</h3></div>
+          <div className="st-card">{field('SUBAGENT')}</div>
+        </section>
+        <section className="st-setting-section">
+          <div className="st-section-head"><h3>网络搜索</h3><span className="st-hint">按需配置一个搜索服务</span></div>
+          <div className="st-card">
+            <p className="st-hint">选择一家配置即可；未配置时使用基础搜索。若两家都有凭据，按现有搜索策略选择。</p>
+            <div className="st-field st-spaced"><span>搜索服务</span><SettingsSelect aria-label="搜索服务" value={searchService} onValueChange={setSearchService} options={[{ value: "BRAVE_API_KEY", label: "Brave Search" }, { value: "TAVILY_API_KEY", label: "Tavily" }]} /></div>
+            {field(searchService)}<SaveActions names={[searchService]} form={form} />
+          </div>
+          <TechnicalFields names={['SUBAGENT', 'BRAVE_API_KEY', 'TAVILY_API_KEY']} />
+        </section>
       </div>}
       {visited.current.has('memory') && <div hidden={activeSection !== 'memory'}>
         <div className="st-tabs" role="tablist" aria-label="记忆与资料">{[['facts', '长期记忆'], ['notes', '笔记资料']].map(([id, text]) => <SettingsButton type="button" className="st-tab" role="tab" tabIndex={memoryTab === id ? 0 : -1} key={id} id={`tab-${id}`} aria-selected={memoryTab === id} aria-controls={`panel-${id}`} onClick={() => setMemoryTab(id as 'facts' | 'notes')} onKeyDown={e => {
           if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) { e.preventDefault(); const next = e.key === 'Home' ? 'facts' : e.key === 'End' ? 'notes' : id === 'facts' ? 'notes' : 'facts'; setMemoryTab(next); document.getElementById(`tab-${next}`)?.focus() }
         }}><Icon name={id === 'facts' ? 'think' : 'doc'} size={13} />{text}</SettingsButton>)}</div>
-        <div role="tabpanel" id="panel-facts" aria-labelledby="tab-facts" hidden={memoryTab !== 'facts'}>{field('AUTO_EXTRACT_FACTS')}<MemorySettings projectPath={projectPath} /></div>
+        <div role="tabpanel" id="panel-facts" aria-labelledby="tab-facts" hidden={memoryTab !== 'facts'}><div className="st-card">{field('AUTO_EXTRACT_FACTS')}<MemorySettings projectPath={projectPath} /></div></div>
         <div role="tabpanel" id="panel-notes" aria-labelledby="tab-notes" hidden={memoryTab !== 'notes'}>
           <div className="st-section-head"><h3>笔记知识库</h3><span className="st-badge">{runtimeStatus?.capabilities?.find(c => c.id === 'notes')?.detail ?? '状态暂不可用'}</span></div>
-          <div className="st-surface st-pad st-stack">{field('NOTES_DIR')}<SettingsButton type="button" className="st-button st-fit" onClick={() => void runAction(async () => { const directory = await api.selectNotesDirectory(); if (directory) form.set('NOTES_DIR', directory) })}><Icon name="folder" size={14} />选择目录</SettingsButton>
+          <div className="st-card st-pad st-stack">{field('NOTES_DIR')}<SettingsButton type="button" className="st-button st-fit" onClick={() => void runAction(async () => { const directory = await api.selectNotesDirectory(); if (directory) form.set('NOTES_DIR', directory) })}><Icon name="folder" size={14} />选择目录</SettingsButton>
             <SettingsDisclosure className="st-details" title="索引高级配置">{field('EMBEDDING_MODEL')}{field('HF_ENDPOINT')}</SettingsDisclosure>
             <SaveActions names={[...RESTART_KEYS]} form={form} title="保存资料配置" />
             <p className="st-hint">当前生效目录：{status?.applied.NOTES_DIR ?? '读取中…'}</p><p className="st-hint">保存目录或索引配置后，需要重启应用。索引在首次检索时初始化。</p>
           </div><TechnicalFields names={RESTART_KEYS} />
         </div>
       </div>}
-      {visited.current.has('general') && <div hidden={activeSection !== 'general'}>{field('STREAM')}{field('LLM_CACHE')}<p className="st-notice">当前运行中的任务继续使用开始时的配置。</p><TechnicalFields names={['STREAM', 'LLM_CACHE']} /></div>}
+      {visited.current.has('general') && <div hidden={activeSection !== 'general'}><div className="st-section-head"><h3>回答与缓存</h3><span className="st-hint">普通偏好会自动保存</span></div><div className="st-card">{field('STREAM')}{field('LLM_CACHE')}<p className="st-notice">当前运行中的任务继续使用开始时的配置。</p></div><TechnicalFields names={['STREAM', 'LLM_CACHE']} /></div>}
       {visited.current.has('advanced') && <div className="st-advanced" hidden={activeSection !== 'advanced'}>
         <section className="st-settings-group" aria-label="执行配置">
         <div className="st-section-head"><h3>执行限制</h3><SettingsButton type="button" className="st-button st-quiet" disabled={form.pending > 0} onClick={() => { for (const key of ['MAX_TURNS', 'MAX_RETRIES']) form.set(key, ''); void form.commit(['MAX_TURNS', 'MAX_RETRIES']).catch(() => {}) }}>恢复此组默认值</SettingsButton></div>

@@ -105,6 +105,11 @@ export interface TurnRequest {
    * 新建对话时就选了。两个真相一旦不一致，用户看着 A 目录、agent 在 B 里干活。
    */
   cwd?: string
+  /**
+   * 外部 CLI 的非模型会话配置选项（思考强度、模式等），创建 ACP 会话时
+   * 逐个应用。可选：内置 agent 不用，外部 CLI 没暴露这类选项时也没有。
+   */
+  configOptions?: { optionId: string; value: string }[]
   emit: EventSink
   token: CancelToken
   /**

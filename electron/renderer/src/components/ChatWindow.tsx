@@ -8,6 +8,7 @@ import { MessageBubble } from './MessageBubble'
 import { ProviderPicker } from './ProviderPicker'
 import { PermissionPicker } from './PermissionPicker'
 import { CliModelPicker } from './CliModelPicker'
+import { CliConfigPicker } from './CliConfigPicker'
 import { ApprovalCard } from './ApprovalCard'
 import { LoadingState } from './LoadingState'
 import { Icon } from './Icon'
@@ -62,8 +63,13 @@ export function ChatWindow({
   onPickProvider,
   onPickPermission,
   onPickCliModel,
+  onPickConfigOption,
+  onRefreshBuiltinModels,
+  refreshingBuiltinModels,
+  onRefreshCliModels,
+  refreshingCliModels,
   projectTask, projectName, onStartProjectTask, startingTask, taskStartError,
-  onAcceptProjectTask, onExportProjectTask, capabilities, onOpenRetrievalSettings,
+  onAcceptProjectTask, onExportProjectTask, onResumeProjectTask, onStopProjectTask, capabilities, onOpenRetrievalSettings,
 }: {
   projectTask?: ProjectTask
   projectName?: string
@@ -72,6 +78,8 @@ export function ChatWindow({
   taskStartError?: string
   onAcceptProjectTask?: () => Promise<unknown>
   onExportProjectTask?: () => Promise<string | null>
+  onResumeProjectTask?: () => Promise<unknown>
+  onStopProjectTask?: () => Promise<unknown>
   capabilities?: RuntimeCapability[]
   onOpenRetrievalSettings?: () => void
   chat: SessionChat
@@ -86,6 +94,8 @@ export function ChatWindow({
   currentVendor?: string
   currentModel?: string
   onPickModel?: (vendorId: string, modelId: string) => void
+  onRefreshBuiltinModels?: (force: boolean) => void
+  refreshingBuiltinModels?: boolean
   /**
    * 编辑重发：改第 idx 条消息（界面下标）的内容，砍掉它之后的历史，重新提问。
    * 不传就没有编辑入口 —— 编辑要砍磁盘历史，那是 App 那层才够得到的能力。
@@ -96,6 +106,9 @@ export function ChatWindow({
   onPickProvider?: (providerId: string) => void
   onPickPermission?: (mode: PermissionMode) => void
   onPickCliModel?: (modelId: string) => void
+  onPickConfigOption?: (optionId: string, value: string) => void
+  onRefreshCliModels?: (force: boolean) => void
+  refreshingCliModels?: boolean
 }) {
   const [text, setText] = useState('')
   const [showAll, setShowAll] = useState(false)
@@ -226,9 +239,10 @@ export function ChatWindow({
   const isBuiltin = !providers || providers.current === 'builtin'
 
   // 只看**这个**会话自己在不在跑。别的会话在跑跟这里无关 —— 锁是按会话的。
-  const blocked = chat.running
+  const workflowBlocked = Boolean(projectTask?.workflow && !['review', 'accepted'].includes(projectTask.status))
+  const blocked = chat.running || workflowBlocked
   const canSend = !blocked && readingFiles === 0 && (text.trim().length > 0 || attachments.length > 0)
-  const canStop = chat.running && Boolean(onCancel)
+  const canStop = (chat.running || projectTask?.status === 'running') && Boolean(onCancel)
 
   // 拖进来的文件走和「点按钮选」完全同一份校验（acceptFiles），
   // 不各写一份 —— 见 AttachmentPicker.tsx 里那个函数的注释。
@@ -280,6 +294,7 @@ export function ChatWindow({
 
   const placeholder = (): string => {
     if (chat.pendingApproval) return '等待你确认上方的写操作…'
+    if (workflowBlocked) return '请先完成项目分析；也可以新建会话继续聊天'
     if (chat.running) return '正在思考…'
     // 内置 agent 且未分组会话：文件工具不可用
     if (isBuiltin && providers && !providers.projectPath) {
@@ -317,9 +332,13 @@ export function ChatWindow({
     // 内容上，让他去瞄准底部那条窄输入框是多余的精确操作。
     // relative 是给下面那层覆盖提示定位用的。
     <section className="chat relative flex min-w-0 flex-1 flex-col" {...dropProps}>
+      {/* 窗口拖拽条：和 SessionList 顶部那条 h-7 对齐，让整个窗口顶边都能
+          按住拖拽，而不只限于左侧边栏那一小段。 */}
+      <div className="h-7 shrink-0 [-webkit-app-region:drag]" />
       <div ref={scrollContainerRef} className="chat__scroll flex flex-1 flex-col gap-2.5 overflow-y-auto px-8 py-6">
         {projectTask && onAcceptProjectTask && onExportProjectTask && (
-          <ProjectTaskCard key={projectTask.id} task={projectTask} onAccept={onAcceptProjectTask} onExport={onExportProjectTask} />
+          <ProjectTaskCard key={projectTask.id} task={projectTask} onAccept={onAcceptProjectTask} onExport={onExportProjectTask}
+            onResume={onResumeProjectTask} onStop={onStopProjectTask} />
         )}
         {!projectTask && chat.messages.length === 0 && !chat.running && onStartProjectTask && (
           <ProjectTaskStarter projectName={projectName} starting={startingTask} error={taskStartError} onStart={onStartProjectTask} />
@@ -347,7 +366,7 @@ export function ChatWindow({
             // 会把 MessageBubble 的 memo 破掉（见那边的注释）
             onEditResend={onEditResend}
             // 跑起来时不许编辑：那一轮还在往 messages 里写，之后的截断会和它打架
-            canEdit={!chat.running}
+            canEdit={!blocked && !projectTask?.workflow}
             // 实时态只给**最后一条**消息 —— 前面的都已经结束了
             live={liveTools && start + i === chat.messages.length - 1}
           />
@@ -503,11 +522,22 @@ export function ChatWindow({
                   currentVendor={currentVendor ?? ''}
                   currentModel={currentModel ?? ''}
                   onPick={onPickModel}
+                  onRefresh={onRefreshBuiltinModels}
+                  refreshing={refreshingBuiltinModels}
                 />
               ) : null}
-              {/* 外部 CLI 声明了模型清单时，换成它那份 */}
-              {!isBuiltin && providers && providers.models.length > 0 && onPickCliModel && (
-                <CliModelPicker view={providers} onPick={onPickCliModel} />
+              {/* 外部 CLI 的目录从 ACP 探测；当前没有选项时也保留入口供用户刷新 */}
+              {!isBuiltin && providers && onPickCliModel && (
+                <CliModelPicker
+                  view={providers}
+                  onPick={onPickCliModel}
+                  onRefresh={onRefreshCliModels}
+                  refreshing={refreshingCliModels}
+                />
+              )}
+              {/* 思考强度、模式等非模型会话配置选项，由同一份 ACP configOptions 发现 */}
+              {!isBuiltin && providers && onPickConfigOption && (
+                <CliConfigPicker options={providers.configOptions} onPick={onPickConfigOption} />
               )}
               {isBuiltin && providers && onPickPermission && (
                 <PermissionPicker current={providers.permission} onPick={onPickPermission} />

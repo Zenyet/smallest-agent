@@ -6,7 +6,7 @@ TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 
 
 [下载安装](#下载安装) · [从源码运行](#快速开始) · [界面与使用说明](#界面与使用说明) · [配置](#配置) · [开发与验证](#开发与验证)
 
-**v0.1.0 已发布**：提供 macOS Apple Silicon 和 Windows x64 安装包。[查看 Release 与更新说明](https://github.com/Zenyet/smallest-agent/releases/tag/v0.1.0)。
+**v0.1.1 已发布**：提供 macOS Apple Silicon 和 Windows x64 安装包。[查看 Release 与更新说明](https://github.com/Zenyet/smallest-agent/releases/tag/v0.1.1)。
 
 ![Smallest Agent 桌面对话界面：左侧按项目组织会话，右侧展示工具调用、回答与模型选择](docs/screenshots/workspace.png)
 
@@ -27,29 +27,29 @@ TypeScript 版本以可独立运行的 Agent 循环为核心，桌面端与 CLI 
 
 ## 下载安装
 
-### macOS · v0.1.0
+### macOS · v0.1.1
 
 适用于 **macOS 12 或更高版本、Apple Silicon（M 系列芯片）**。本次发布包含 Electron 桌面应用；Intel Mac、Linux 和 Rust / GPUI 版本暂无预编译安装包。
 
 | 下载 | 用途 |
 | --- | --- |
-| [DMG 安装包](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-mac-arm64.dmg) | 推荐：打开后将 Smallest Agent 拖入 Applications |
-| [ZIP 压缩包](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-mac-arm64.zip) | 解压后将 Smallest Agent.app 移入 Applications |
-| [SHA256SUMS.txt](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/SHA256SUMS.txt) | 校验下载文件的完整性 |
+| [DMG 安装包](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.1/Smallest-Agent-0.1.1-mac-arm64.dmg) | 推荐：打开后将 Smallest Agent 拖入 Applications |
+| [ZIP 压缩包](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.1/Smallest-Agent-0.1.1-mac-arm64.zip) | 解压后将 Smallest Agent.app 移入 Applications |
+| [SHA256SUMS.txt](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.1/SHA256SUMS.txt) | 校验下载文件的完整性 |
 
 应用内已包含 Electron 运行时，无需克隆仓库或安装项目依赖。项目文件工具仍通过外部 `npx` 启动，需要安装 Node.js 22.12+ 或 24，并确保应用能找到 `npx`；外部 ACP Agent 也需单独安装和认证。
 
 此版本使用 ad-hoc 签名，**未使用 Apple Developer ID 签名，也未经过 Apple 公证**。首次打开可能被 macOS 拦截。确认下载来源后，可按 [Apple 官方说明](https://support.apple.com/zh-cn/102445)，在尝试打开后进入「系统设置 → 隐私与安全性 → 仍要打开」。
 
-### Windows · v0.1.0
+### Windows · v0.1.1
 
 适用于 **Windows 10/11 x64**，沿用新的应用图标。
 
 | 下载 | 用途 |
 | --- | --- |
-| [Setup 安装版](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-win-x64-Setup.exe) | 可选择安装目录，创建开始菜单和桌面快捷方式 |
-| [Portable 免安装版](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/Smallest-Agent-0.1.0-win-x64-Portable.exe) | 直接运行；设置和会话仍保存在用户应用数据目录 |
-| [SHA256SUMS-windows.txt](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.0/SHA256SUMS-windows.txt) | Windows EXE 的 SHA-256 校验值 |
+| [Setup 安装版](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.1/Smallest-Agent-0.1.1-win-x64-Setup.exe) | 可选择安装目录，创建开始菜单和桌面快捷方式 |
+| [Portable 免安装版](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.1/Smallest-Agent-0.1.1-win-x64-Portable.exe) | 直接运行；设置和会话仍保存在用户应用数据目录 |
+| [SHA256SUMS-windows.txt](https://github.com/Zenyet/smallest-agent/releases/download/v0.1.1/SHA256SUMS-windows.txt) | Windows EXE 的 SHA-256 校验值 |
 
 Windows 包包含 Electron 运行时；项目文件工具与外部 ACP Agent 的依赖要求同上。当前未配置 Windows 代码签名证书。构建提交号见 Release 附件 `BUILD-COMMIT-windows.txt`。
 
@@ -63,9 +63,9 @@ Windows 包包含 Electron 运行时；项目文件工具与外部 ACP Agent 的
 
 安装包不包含 API Key 或外部 Agent 凭据。笔记检索的 embedding 模型在首次使用时下载。
 
-### v0.1.0 的功能范围
+### v0.1.1 的功能范围
 
-本次发布基于已提交的 `main`，包括项目会话、模型连接、只读项目理解、附件、长期记忆、笔记检索及 MCP / ACP 接入。开发中的分阶段并行分析和断点继续尚未包含在 v0.1.0 中。
+本次发布基于已提交的 `main`，包括项目会话、模型连接、只读项目理解、附件、长期记忆、笔记检索及 MCP / ACP 接入。开发中的分阶段并行分析和断点继续尚未包含在 v0.1.1 中。
 
 ## 快速开始
 
@@ -161,9 +161,9 @@ SESSION_ID=demo pnpm dev "这个项目使用什么语言？"
 
 ![项目理解成果：展示分析阶段、文件依据、完整报告，以及采用和导出操作](docs/screenshots/project-overview.png)
 
-*截图展示开发中的分阶段分析界面。v0.1.0 使用单次只读项目任务，支持读取依据、成果验收和 Markdown 导出。*
+*截图展示开发中的分阶段分析界面。v0.1.1 使用单次只读项目任务，支持读取依据、成果验收和 Markdown 导出。*
 
-从新对话点击「选择项目并开始」，或在已选项目中点击「理解项目」。v0.1.0 的使用流程如下：
+从新对话点击「选择项目并开始」，或在已选项目中点击「理解项目」。v0.1.1 的使用流程如下：
 
 | 阶段 | 界面与操作 |
 | --- | --- |
@@ -171,7 +171,7 @@ SESSION_ID=demo pnpm dev "这个项目使用什么语言？"
 | 生成说明 | 整理项目结构、运行方法和核心流程，并保留实际读取的文件片段 |
 | 人工验收 | 展开「查看读取依据」和「查看完整成果」，确认后点击「采用成果」，或导出 Markdown |
 
-任务可停止；v0.1.0 中停止或失败后需重新发起任务，不支持断点继续。
+任务可停止；v0.1.1 中停止或失败后需重新发起任务，不支持断点继续。
 
 Electron 内置 Agent 的文件工具以会话所属的项目目录为访问范围；未选择项目的会话不加载项目文件工具。会话提供「只读」「询问」「自动」三种权限模式，默认在执行受控写操作前请求确认。
 
@@ -312,9 +312,9 @@ pnpm install --frozen-lockfile
 pnpm package:win
 ```
 
-输出 `Smallest-Agent-0.1.0-win-x64-Setup.exe` 和 `Smallest-Agent-0.1.0-win-x64-Portable.exe`（文件名随版本号变化）。安装版支持选择安装目录，并创建开始菜单和桌面快捷方式；免安装版可直接运行，设置和会话仍保存在用户应用数据目录。当前未配置 Windows 代码签名证书。
+输出 `Smallest-Agent-0.1.1-win-x64-Setup.exe` 和 `Smallest-Agent-0.1.1-win-x64-Portable.exe`（文件名随版本号变化）。安装版支持选择安装目录，并创建开始菜单和桌面快捷方式；免安装版可直接运行，设置和会话仍保存在用户应用数据目录。当前未配置 Windows 代码签名证书。
 
-[`Windows package`](.github/workflows/windows.yml) 在 Windows runner 上构建 x64 产物，验证打包依赖、实际安装到含空格与中文的路径，并检查应用能进入可输入状态。推送到 `main`、创建版本标签和 Pull Request 会触发，也可在 GitHub Actions 中手动运行。成功后从该次运行的 `Smallest-Agent-windows-x64` artifact 下载两个 EXE、SHA-256 校验文件和构建提交号。手动运行时填写 `release_tag`（例如 `v0.1.0`），验证通过后会上传 Windows 附件到对应的已有 Release；不填写则仅构建，不发布。
+[`Windows package`](.github/workflows/windows.yml) 在 Windows runner 上构建 x64 产物，验证打包依赖、实际安装到含空格与中文的路径，并检查应用能进入可输入状态。推送到 `main`、创建版本标签和 Pull Request 会触发，也可在 GitHub Actions 中手动运行。成功后从该次运行的 `Smallest-Agent-windows-x64` artifact 下载两个 EXE、SHA-256 校验文件和构建提交号。手动运行时填写 `release_tag`（例如 `v0.1.1`），验证通过后会上传 Windows 附件到对应的已有 Release；不填写则仅构建，不发布。
 
 macOS 上也可执行 `pnpm package:win` 交叉打包。pnpm 会额外安装 Windows 原生可选依赖，打包时只保留目标平台和架构；交叉打包不能代替 Windows 上的安装与运行验证。
 

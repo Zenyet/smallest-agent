@@ -34,6 +34,7 @@ const view = (over: Partial<ProvidersView> = {}): ProvidersView => ({
   ],
   current: 'builtin',
   models: [],
+  configOptions: [],
   permission: 'ask',
   configPath: '/tmp/providers.json',
   ...over,

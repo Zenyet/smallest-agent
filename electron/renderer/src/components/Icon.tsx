@@ -65,6 +65,9 @@ const PATHS: Record<string, ReactNode> = {
   // 缓存命中：闪电
   cache: <path d="M13 2 4 14h6l-1 8 9-12h-6z" />,
 
+  // 刷新 / 重试：循环箭头
+  refresh: <><path d="M20 7v5h-5M4 17v-5h5" /><path d="M5.6 9a7 7 0 0 1 11.6-2L20 12M4 12l2.8 5a7 7 0 0 0 11.6-2" /></>,
+
   // 来源 / 文档
   doc: (
     <>
