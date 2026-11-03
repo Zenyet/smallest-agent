@@ -24,9 +24,9 @@
     "dev:electron": "electron-vite dev",
     "build:electron": "electron-vite build",
     "preview:electron": "electron-vite preview",
-    "package:mac": "electron-vite build && electron-builder --mac",
+    "package:mac": "electron-vite build && electron-builder --mac --publish never",
     "package:win": "electron-vite build && electron-builder --win --x64 --publish never",
-    "package:linux": "electron-vite build && electron-builder --linux",
+    "package:linux": "electron-vite build && electron-builder --linux --publish never",
     "build:icons": "node scripts/build-icons.mjs",
     "measure:startup": "node scripts/measure-startup.mjs",
     "check:package": "node scripts/check-package.mjs"
