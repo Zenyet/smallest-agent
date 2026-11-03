@@ -97,13 +97,24 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF#refs/tags/}"
-          # upload-artifact 保留 dist-electron/ 前缀，merge 后都在 artifacts/dist-electron/ 下
-          cd artifacts/dist-electron
-          sha256sum *.dmg *.zip *.AppImage *.exe > SHA256SUMS.txt
+          cd artifacts
+          # upload-artifact 不保证路径结构，递归查找所有安装包，别依赖具体目录
+          files=$(find . -type f \( -name "*.dmg" -o -name "*.zip" -o -name "*.AppImage" -o -name "*.exe" \) | sort)
+          if [ -z "$files" ]; then
+            echo "ERROR: 未找到任何安装包产物，artifacts 目录内容如下：" >&2
+            ls -R . >&2
+            exit 1
+          fi
           echo "=== 产物清单 ==="
-          ls -lh
+          echo "$files"
+          # 校验和用 basename，去掉路径前缀，输出干净
+          echo "$files" | while IFS= read -r f; do
+            (cd "$(dirname "$f")" && sha256sum "$(basename "$f")")
+          done > SHA256SUMS.txt
+          echo "=== SHA256 ==="
+          cat SHA256SUMS.txt
           echo "=== 创建 Release $tag ==="
           gh release create "$tag" \
             --title "Smallest Agent $tag" \
             --generate-notes \
-            *.dmg *.zip *.AppImage *.exe SHA256SUMS.txt
+            $files SHA256SUMS.txt
