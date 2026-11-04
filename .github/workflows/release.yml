@@ -115,6 +115,7 @@ jobs:
           cat SHA256SUMS.txt
           echo "=== 创建 Release $tag ==="
           gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
             --title "Smallest Agent $tag" \
             --generate-notes \
             $files SHA256SUMS.txt
